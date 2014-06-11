@@ -104,6 +104,7 @@ static time_t now;
 static time_t last_timeout_check;
 static int do_shutdown;
 static int sock;
+static uint32_t seq_no = 0;
 
 /* Daemon print functions hook. */
 static void (*phook)(int, const char *, ...);
@@ -388,6 +389,10 @@ send_ack(struct netdump_client *client, struct netdump_msg *msg)
     
 	assert(client != NULL && msg != NULL);
 
+	if(msg->nm_hdr.mh_seqno > seq_no){
+		seq_no = msg->nm_hdr.mh_seqno;
+	}
+
 	bzero(&ack, sizeof(ack));
 	ack.na_seqno = htonl(msg->nm_hdr.mh_seqno);
 	do {
@@ -597,6 +602,11 @@ handle_packet(struct netdump_client *client, struct sockaddr_in *from,
 
 	if (client != NULL)
 		client->last_msg = time(NULL);
+	if (msg->nm_hdr.mh_seqno <= seq_no){
+		send_ack(client, msg);
+		return;
+	}
+
 
 	switch (msg->nm_hdr.mh_type) {
 	case NETDUMP_HERALD:
