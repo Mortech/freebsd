@@ -35,7 +35,23 @@
 
 #include "opt_inet.h"
 #include "opt_inet6.h"
+#ifdef HAVE_KERNEL_OPTION_HEADERS
+#include "opt_netdump.h"
+#endif
 #include "ixgbe.h"
+
+#if defined(DEVICE_POLLING) || defined(NETDUMP_CLIENT)
+
+#define	IXGBE_TX_LOCK_COND(txr, locking) do {				\
+	if ((locking) != 0)						\
+		IXGBE_TX_LOCK(txr);					\
+} while (0)
+#define	IXGBE_TX_UNLOCK_COND(txr, locking) do {				\
+	if ((locking) != 0)						\
+		IXGBE_TX_UNLOCK(txr);					\
+} while (0)
+
+#endif
 
 /*********************************************************************
  *  Set this to one to display debug statistics
@@ -148,7 +164,7 @@ static void     ixgbe_enable_intr(struct adapter *);
 static void     ixgbe_disable_intr(struct adapter *);
 static void     ixgbe_update_stats_counters(struct adapter *);
 static void	ixgbe_txeof(struct tx_ring *);
-static bool	ixgbe_rxeof(struct ix_queue *);
+static bool	ixgbe_rxeof(struct ix_queue *, int *);
 static void	ixgbe_rx_checksum(u32, struct mbuf *, u32);
 static void     ixgbe_set_promisc(struct adapter *);
 static void     ixgbe_set_multi(struct adapter *);
@@ -207,9 +223,31 @@ static void	ixgbe_reinit_fdir(void *, int);
 /* Missing shared code prototype */
 extern void ixgbe_stop_mac_link_on_d3_82599(struct ixgbe_hw *hw);
 
+#if defined(DEVICE_POLLING) || defined(NETDUMP_CLIENT)
+static int	_ixgbe_poll_generic(struct ifnet *ifp, enum poll_cmd cmd,
+		    int count, int locking);
+static poll_handler_t ixgbe_poll;
+#endif
+#ifdef NETDUMP_CLIENT
+static poll_handler_t ixgbe_poll_unlocked;
+static void ixgbe_ndump_disable_intr(struct ifnet *);
+static void ixgbe_ndump_enable_intr(struct ifnet *);
+#endif
+
 /*********************************************************************
  *  FreeBSD Device Interface Entry Points
  *********************************************************************/
+
+#ifdef NETDUMP_CLIENT
+
+static struct netdump_methods ixgbe_ndump_methods = {
+	.ne_poll_locked = ixgbe_poll,
+	.ne_poll_unlocked = ixgbe_poll_unlocked,
+	.ne_disable_intr = ixgbe_ndump_disable_intr,
+	.ne_enable_intr = ixgbe_ndump_enable_intr
+};
+
+#endif
 
 static device_method_t ixgbe_methods[] = {
 	/* Device interface */
@@ -667,6 +705,11 @@ ixgbe_detach(device_t dev)
 		return (EBUSY);
 	}
 
+#ifdef DEVICE_POLLING
+	if ((adapter->ifp->if_capenable & IFCAP_POLLING) != 0)
+		ether_poll_deregister(adapter->ifp);
+#endif
+
 	IXGBE_CORE_LOCK(adapter);
 	ixgbe_stop(adapter);
 	IXGBE_CORE_UNLOCK(adapter);
@@ -1026,6 +1069,25 @@ ixgbe_ioctl(struct ifnet * ifp, u_long command, caddr_t data)
 	{
 		int mask = ifr->ifr_reqcap ^ ifp->if_capenable;
 		IOCTL_DEBUGOUT("ioctl: SIOCSIFCAP (Set Capabilities)");
+#ifdef DEVICE_POLLING
+		if ((mask & IFCAP_POLLING) != 0) {
+			if ((ifr->ifr_reqcap & IFCAP_POLLING) != 0) {
+				error = ether_poll_register(ixgbe_poll, ifp);
+				if (error != 0)
+					return (error);
+				IXGBE_CORE_LOCK(adapter);
+				ixgbe_disable_intr(adapter);
+				ifp->if_capenable |= IFCAP_POLLING;
+				IXGBE_CORE_UNLOCK(adapter);
+			} else {
+				error = ether_poll_deregister(ifp);
+				IXGBE_CORE_LOCK(adapter);
+				ixgbe_enable_intr(adapter);
+				ifp->if_capenable &= ~IFCAP_POLLING;
+				IXGBE_CORE_UNLOCK(adapter);
+			}
+		}
+#endif /* !DEVICE_POLLING */
 		if (mask & IFCAP_HWCSUM)
 			ifp->if_capenable ^= IFCAP_HWCSUM;
 		if (mask & IFCAP_TSO4)
@@ -1339,8 +1401,13 @@ ixgbe_init_locked(struct adapter *adapter)
 	/* Set up VLAN support and filter */
 	ixgbe_setup_vlan_hw_support(adapter);
 
-	/* And now turn on interrupts */
-	ixgbe_enable_intr(adapter);
+#ifdef DEVICE_POLLING
+	/* Disable interrupts if polling is on, enable otherwise. */
+	if ((ifp->if_capenable & IFCAP_POLLING) != 0)
+		ixgbe_disable_intr(adapter);
+	else
+#endif
+		ixgbe_enable_intr(adapter);
 
 	/* Now inform the stack we're ready */
 	ifp->if_drv_flags |= IFF_DRV_RUNNING;
@@ -1416,7 +1483,7 @@ ixgbe_handle_que(void *context, int pending)
 	bool		more;
 
 	if (ifp->if_drv_flags & IFF_DRV_RUNNING) {
-		more = ixgbe_rxeof(que);
+		more = ixgbe_rxeof(que, NULL);
 		IXGBE_TX_LOCK(txr);
 		ixgbe_txeof(txr);
 #ifndef IXGBE_LEGACY_TX
@@ -1455,6 +1522,10 @@ ixgbe_legacy_irq(void *arg)
 	bool		more;
 	u32       	reg_eicr;
 
+#ifdef DEVICE_POLLING
+	if ((adapter->ifp->if_capenable & IFCAP_POLLING) != 0)
+		return;
+#endif
 
 	reg_eicr = IXGBE_READ_REG(hw, IXGBE_EICR);
 
@@ -1464,7 +1535,7 @@ ixgbe_legacy_irq(void *arg)
 		return;
 	}
 
-	more = ixgbe_rxeof(que);
+	more = ixgbe_rxeof(que, NULL);
 
 	IXGBE_TX_LOCK(txr);
 	ixgbe_txeof(txr);
@@ -1520,7 +1591,7 @@ ixgbe_msix_que(void *arg)
 	ixgbe_disable_queue(adapter, que->msix);
 	++que->irqs;
 
-	more = ixgbe_rxeof(que);
+	more = ixgbe_rxeof(que, NULL);
 
 	IXGBE_TX_LOCK(txr);
 	ixgbe_txeof(txr);
@@ -2646,6 +2717,9 @@ ixgbe_setup_interface(device_t dev, struct adapter *adapter)
 	ifp->if_snd.ifq_drv_maxlen = adapter->num_tx_desc - 2;
 	IFQ_SET_READY(&ifp->if_snd);
 #endif
+#ifdef NETDUMP_CLIENT
+	ifp->if_ndumpfuncs = &ixgbe_ndump_methods;
+#endif
 
 	ether_ifattach(ifp, adapter->hw.mac.addr);
 
@@ -2665,6 +2739,9 @@ ixgbe_setup_interface(device_t dev, struct adapter *adapter)
 			     |  IFCAP_VLAN_MTU
 			     |  IFCAP_HWSTATS;
 	ifp->if_capenable = ifp->if_capabilities;
+#ifdef DEVICE_POLLING
+	ifp->if_capabilities |= IFCAP_POLLING;
+#endif
 
 	/*
 	** Don't turn this on by default, if vlans are
@@ -4404,14 +4481,14 @@ ixgbe_rx_discard(struct rx_ring *rxr, int i)
  *  Return TRUE for more work, FALSE for all clean.
  *********************************************************************/
 static bool
-ixgbe_rxeof(struct ix_queue *que)
+ixgbe_rxeof(struct ix_queue *que, int *rx_npktsp)
 {
 	struct adapter		*adapter = que->adapter;
 	struct rx_ring		*rxr = que->rxr;
 	struct ifnet		*ifp = adapter->ifp;
 	struct lro_ctrl		*lro = &rxr->lro;
 	struct lro_entry	*queued;
-	int			i, nextp, processed = 0;
+	int			i, nextp, processed = 0, rx_npkts = 0;
 	u32			staterr = 0;
 	u16			count = rxr->process_limit;
 	union ixgbe_adv_rx_desc	*cur;
@@ -4590,6 +4667,7 @@ next_desc:
 			rxr->next_to_check = i;
 			ixgbe_rx_input(rxr, ifp, sendmp, ptype);
 			i = rxr->next_to_check;
+			rx_npkts++;
 		}
 
                /* Every 8 descriptors we go to refresh mbufs */
@@ -4618,6 +4696,9 @@ next_desc:
 	/*
 	** Still have cleaning to do?
 	*/
+	if (rx_npktsp != NULL)
+		*rx_npktsp = rx_npkts;
+
 	if ((staterr & IXGBE_RXD_STAT_DD) != 0)
 		return (TRUE);
 	else
@@ -5166,6 +5247,88 @@ ixgbe_reinit_fdir(void *context, int pending)
 	return;
 }
 #endif
+
+#if defined(DEVICE_POLLING) || defined(NETDUMP_CLIENT)
+static int
+_ixgbe_poll_generic(struct ifnet *ifp, enum poll_cmd cmd, int count,
+    int locking)
+{
+	struct adapter *adapter;
+	struct tx_ring *txr;
+	struct ix_queue *que;
+	struct ixgbe_hw *hw;
+	u32 loop, reg_eicr;
+	int rx_npkts;
+
+	adapter = ifp->if_softc;
+	txr = adapter->tx_rings;
+	que = adapter->queues;
+	hw = &adapter->hw;
+	loop = MAX_LOOP;
+	rx_npkts = 0;
+
+	if ((ifp->if_drv_flags & IFF_DRV_RUNNING) == 0)
+		return (rx_npkts);
+
+	if (cmd == POLL_AND_CHECK_STATUS) {
+		reg_eicr = IXGBE_READ_REG(hw, IXGBE_EICR);
+
+		/* Link status change */
+		if ((reg_eicr & IXGBE_EICR_LSC) != 0)
+			taskqueue_enqueue(adapter->tq, &adapter->link_task);
+	}
+	ixgbe_rxeof(que, &rx_npkts);
+	IXGBE_TX_LOCK_COND(txr, locking);
+	ixgbe_txeof(txr);
+#if __FreeBSD_version >= 800000
+	if (!drbr_empty(ifp, txr->br))
+		ixgbe_mq_start_locked(ifp, txr);
+#else
+	if (!IFQ_DRV_IS_EMPTY(&ifp->if_snd))
+		ixgbe_start_locked(txr, ifp);
+#endif
+	IXGBE_TX_UNLOCK_COND(txr, locking);
+	return (rx_npkts);
+}
+
+static int
+ixgbe_poll(struct ifnet *ifp, enum poll_cmd cmd, int count)
+{
+
+	return (_ixgbe_poll_generic(ifp, cmd, count, 1));
+}
+#endif /* !DEVICE_POLLING && !NETDUMP_CLIENT */
+
+#ifdef NETDUMP_CLIENT
+static int
+ixgbe_poll_unlocked(struct ifnet *ifp, enum poll_cmd cmd, int count)
+{
+
+	return (_ixgbe_poll_generic(ifp, cmd, count, 0));
+}
+
+static void
+ixgbe_ndump_disable_intr(struct ifnet *ifp)
+{
+	struct adapter *adapter;
+
+	adapter = ifp->if_softc;
+	IXGBE_CORE_LOCK(adapter);
+	ixgbe_disable_intr(adapter);
+	IXGBE_CORE_UNLOCK(adapter);
+}
+
+static void
+ixgbe_ndump_enable_intr(struct ifnet *ifp)
+{
+	struct adapter *adapter;
+
+	adapter = ifp->if_softc;
+	IXGBE_CORE_LOCK(adapter);
+	ixgbe_enable_intr(adapter);
+	IXGBE_CORE_UNLOCK(adapter);
+}
+#endif /* !NETDUMP_CLIENT */
 
 /**********************************************************************
  *

@@ -50,6 +50,7 @@ SUBDIR=	adduser \
 	mptutil \
 	mtest \
 	${_mtree} \
+	netdumpsrv \
 	newsyslog \
 	nfscbd \
 	nfsd \

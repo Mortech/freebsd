@@ -39,6 +39,7 @@
 #ifdef HAVE_KERNEL_OPTION_HEADERS
 #include "opt_device_polling.h"
 #include "opt_altq.h"
+#include "opt_netdump.h"
 #endif
 
 #include <sys/param.h>
@@ -80,6 +81,9 @@
 #include <netinet/if_ether.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
+#ifdef NETDUMP_CLIENT
+#include <netinet/netdump.h>
+#endif
 #include <netinet/tcp.h>
 #include <netinet/tcp_lro.h>
 #include <netinet/udp.h>
@@ -92,6 +96,27 @@
 #include "e1000_api.h"
 #include "e1000_82575.h"
 #include "if_igb.h"
+
+#if defined(DEVICE_POLLING) || defined(NETDUMP_CLIENT)
+
+#define	IGB_CORE_LOCK_COND(adapter, locking) do {			\
+	if ((locking) != 0)						\
+		IGB_CORE_LOCK(adapter);					\
+} while (0)
+#define	IGB_CORE_UNLOCK_COND(adapter, locking) do {			\
+	if ((locking) != 0)						\
+		IGB_CORE_UNLOCK(adapter);				\
+} while (0)
+#define	IGB_TX_LOCK_COND(txr, locking) do {				\
+	if ((locking) != 0)						\
+		IGB_TX_LOCK(txr);					\
+} while (0)
+#define	IGB_TX_UNLOCK_COND(txr, locking) do {				\
+	if ((locking) != 0)						\
+		IGB_TX_UNLOCK(txr);					\
+} while (0)
+
+#endif
 
 /*********************************************************************
  *  Set this to one to display debug statistics
@@ -289,13 +314,31 @@ static int	igb_set_flowcntl(SYSCTL_HANDLER_ARGS);
 static int	igb_sysctl_dmac(SYSCTL_HANDLER_ARGS);
 static int	igb_sysctl_eee(SYSCTL_HANDLER_ARGS);
 
-#ifdef DEVICE_POLLING
+#if defined(DEVICE_POLLING) || defined(NETDUMP_CLIENT)
+static int	_igb_poll_generic(struct ifnet *ifp, enum poll_cmd cmd,
+		    int count, int locking);
 static poll_handler_t igb_poll;
-#endif /* POLLING */
+#endif
+#ifdef NETDUMP_CLIENT
+static poll_handler_t igb_poll_unlocked;
+static ndumplock_handler_t igb_ndump_disable_intr;
+static ndumplock_handler_t igb_ndump_enable_intr;
+#endif
 
 /*********************************************************************
  *  FreeBSD Device Interface Entry Points
  *********************************************************************/
+
+#ifdef NETDUMP_CLIENT
+
+static struct netdump_methods igb_ndump_methods = {
+	.ne_poll_locked = igb_poll,
+	.ne_poll_unlocked = igb_poll_unlocked,
+	.ne_disable_intr = igb_ndump_disable_intr,
+	.ne_enable_intr = igb_ndump_enable_intr
+};
+
+#endif
 
 static device_method_t igb_methods[] = {
 	/* Device interface */
@@ -1524,7 +1567,7 @@ igb_irq_fast(void *arg)
 	return FILTER_HANDLED;
 }
 
-#ifdef DEVICE_POLLING
+#if defined(DEVICE_POLLING) || defined(NETDUMP_CLIENT)
 #if __FreeBSD_version >= 800000
 #define POLL_RETURN_COUNT(a) (a)
 static int
@@ -1532,7 +1575,7 @@ static int
 #define POLL_RETURN_COUNT(a)
 static void
 #endif
-igb_poll(struct ifnet *ifp, enum poll_cmd cmd, int count)
+_igb_poll_generic(struct ifnet *ifp, enum poll_cmd cmd, int count, int locking)
 {
 	struct adapter		*adapter = ifp->if_softc;
 	struct igb_queue	*que;
@@ -1541,9 +1584,9 @@ igb_poll(struct ifnet *ifp, enum poll_cmd cmd, int count)
 	u32			loop = IGB_MAX_LOOP;
 	bool			more;
 
-	IGB_CORE_LOCK(adapter);
+	IGB_CORE_LOCK_COND(adapter, locking);
 	if ((ifp->if_drv_flags & IFF_DRV_RUNNING) == 0) {
-		IGB_CORE_UNLOCK(adapter);
+		IGB_CORE_UNLOCK_COND(adapter, locking);
 		return POLL_RETURN_COUNT(rx_done);
 	}
 
@@ -1556,7 +1599,7 @@ igb_poll(struct ifnet *ifp, enum poll_cmd cmd, int count)
 		if (reg_icr & E1000_ICR_RXO)
 			adapter->rx_overruns++;
 	}
-	IGB_CORE_UNLOCK(adapter);
+	IGB_CORE_UNLOCK_COND(adapter, locking);
 
 	for (int i = 0; i < adapter->num_queues; i++) {
 		que = &adapter->queues[i];
@@ -1564,7 +1607,7 @@ igb_poll(struct ifnet *ifp, enum poll_cmd cmd, int count)
 
 		igb_rxeof(que, count, &rx_done);
 
-		IGB_TX_LOCK(txr);
+		IGB_TX_LOCK_COND(txr, locking);
 		do {
 			more = igb_txeof(txr);
 		} while (loop-- && more);
@@ -1575,12 +1618,50 @@ igb_poll(struct ifnet *ifp, enum poll_cmd cmd, int count)
 		if (!IFQ_DRV_IS_EMPTY(&ifp->if_snd))
 			igb_start_locked(txr, ifp);
 #endif
-		IGB_TX_UNLOCK(txr);
+		IGB_TX_UNLOCK_COND(txr, locking);
 	}
 
 	return POLL_RETURN_COUNT(rx_done);
 }
-#endif /* DEVICE_POLLING */
+
+static int
+igb_poll(struct ifnet *ifp, enum poll_cmd cmd, int count)
+{
+
+	return (_igb_poll_generic(ifp, cmd, count, 1));
+}
+#endif /* !DEVICE_POLLING && !NETDUMP_CLIENT */
+
+#ifdef NETDUMP_CLIENT
+static int
+igb_poll_unlocked(struct ifnet *ifp, enum poll_cmd cmd, int count)
+{
+
+	return (_igb_poll_generic(ifp, cmd, count, 0));
+}
+
+static void
+igb_ndump_disable_intr(struct ifnet *ifp)
+{
+	struct adapter *adapter;
+
+	adapter = ifp->if_softc;
+	IGB_CORE_LOCK(adapter);
+	igb_disable_intr(adapter);
+	IGB_CORE_UNLOCK(adapter);
+}
+
+static void
+igb_ndump_enable_intr(struct ifnet *ifp)
+{
+	struct adapter *adapter;
+
+	adapter = ifp->if_softc;
+	IGB_CORE_LOCK(adapter);
+	igb_enable_intr(adapter);
+	IGB_CORE_UNLOCK(adapter);
+}
+#endif /* !NETDUMP_CLIENT */
 
 /*********************************************************************
  *
@@ -3115,6 +3196,9 @@ igb_setup_interface(device_t dev, struct adapter *adapter)
 	ifp->if_softc = adapter;
 	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
 	ifp->if_ioctl = igb_ioctl;
+#ifdef NETDUMP_CLIENT
+	ifp->if_ndumpfuncs = &igb_ndump_methods;
+#endif
 #ifndef IGB_LEGACY_TX
 	ifp->if_transmit = igb_mq_start;
 	ifp->if_qflush = igb_qflush;

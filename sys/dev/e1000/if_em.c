@@ -37,6 +37,7 @@
 
 #ifdef HAVE_KERNEL_OPTION_HEADERS
 #include "opt_device_polling.h"
+#include "opt_netdump.h"
 #endif
 
 #include <sys/param.h>
@@ -75,6 +76,9 @@
 #include <netinet/if_ether.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
+#ifdef NETDUMP_CLIENT
+#include <netinet/netdump.h>
+#endif
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
 
@@ -87,6 +91,27 @@
 #include "e1000_82571.h"
 #include "if_em.h"
 
+#if defined(DEVICE_POLLING) || defined(NETDUMP_CLIENT)
+
+#define	EM_CORE_LOCK_COND(adapter, locking) do {			\
+	if ((locking) != 0)						\
+		EM_CORE_LOCK(adapter);					\
+} while (0)
+#define	EM_CORE_UNLOCK_COND(adapter, locking) do {			\
+	if ((locking) != 0)						\
+		EM_CORE_UNLOCK(adapter);				\
+} while (0)
+#define	EM_TX_LOCK_COND(txr, locking) do {				\
+	if ((locking) != 0)						\
+		EM_TX_LOCK(txr);					\
+} while (0)
+#define	EM_TX_UNLOCK_COND(txr, locking) do {				\
+	if ((locking) != 0)						\
+		EM_TX_UNLOCK(txr);					\
+} while (0)
+
+#endif
+
 /*********************************************************************
  *  Set this to one to display debug statistics
  *********************************************************************/
@@ -96,6 +121,10 @@ int	em_display_debug_stats = 0;
  *  Driver version:
  *********************************************************************/
 char em_driver_version[] = "7.3.8";
+
+#ifdef NETDUMP_CLIENT
+struct mbuf * netdump_mbuf;
+#endif
 
 /*********************************************************************
  *  PCI Device ID Table
@@ -300,13 +329,31 @@ static int	em_sysctl_eee(SYSCTL_HANDLER_ARGS);
 
 static __inline void em_rx_discard(struct rx_ring *, int);
 
-#ifdef DEVICE_POLLING
+#if defined(DEVICE_POLLING) || defined(NETDUMP_CLIENT)
+static int	_em_poll_generic(struct ifnet *ifp, enum poll_cmd cmd,
+		    int count, int locking);
 static poll_handler_t em_poll;
-#endif /* POLLING */
+#endif
+#ifdef NETDUMP_CLIENT
+static poll_handler_t em_poll_unlocked;
+static ndumplock_handler_t em_ndump_disable_intr;
+static ndumplock_handler_t em_ndump_enable_intr;
+#endif
 
 /*********************************************************************
  *  FreeBSD Device Interface Entry Points
  *********************************************************************/
+
+#ifdef NETDUMP_CLIENT
+
+static struct netdump_methods em_ndump_methods = {
+	.ne_poll_locked = em_poll,
+	.ne_poll_unlocked = em_poll_unlocked,
+	.ne_disable_intr = em_ndump_disable_intr,
+	.ne_enable_intr = em_ndump_enable_intr
+};
+
+#endif
 
 static device_method_t em_methods[] = {
 	/* Device interface */
@@ -1348,6 +1395,16 @@ em_init_locked(struct adapter *adapter)
 	else
 		adapter->rx_mbuf_sz = MJUM9BYTES;
 
+#ifdef NETDUMP_CLIENT
+	/* TODO: If setting this up here, should 
+	*	check to see if it exists already first.
+	*	Also, this needs to be freed at some point!
+	*/
+	/*  Setup cluster for use later */
+	netdump_mbuf = m_getjcl(M_NOWAIT, MT_DATA,
+			    M_PKTHDR, adapter->rx_mbuf_sz);
+#endif
+
 	/* Prepare receive descriptors and buffers */
 	if (em_setup_receive_structures(adapter)) {
 		device_printf(dev, "Could not setup receive structures\n");
@@ -1416,14 +1473,14 @@ em_init(void *arg)
 }
 
 
-#ifdef DEVICE_POLLING
+#if defined(DEVICE_POLLING) || defined(NETDUMP_CLIENT)
 /*********************************************************************
  *
  *  Legacy polling routine: note this only works with single queue
  *
  *********************************************************************/
 static int
-em_poll(struct ifnet *ifp, enum poll_cmd cmd, int count)
+_em_poll_generic(struct ifnet *ifp, enum poll_cmd cmd, int count, int locking)
 {
 	struct adapter *adapter = ifp->if_softc;
 	struct tx_ring	*txr = adapter->tx_rings;
@@ -1431,9 +1488,9 @@ em_poll(struct ifnet *ifp, enum poll_cmd cmd, int count)
 	u32		reg_icr;
 	int		rx_done;
 
-	EM_CORE_LOCK(adapter);
+	EM_CORE_LOCK_COND(adapter, locking);
 	if ((ifp->if_drv_flags & IFF_DRV_RUNNING) == 0) {
-		EM_CORE_UNLOCK(adapter);
+		EM_CORE_UNLOCK_COND(adapter, locking);
 		return (0);
 	}
 
@@ -1447,11 +1504,11 @@ em_poll(struct ifnet *ifp, enum poll_cmd cmd, int count)
 			    em_local_timer, adapter);
 		}
 	}
-	EM_CORE_UNLOCK(adapter);
+	EM_CORE_UNLOCK_COND(adapter, locking);
 
 	em_rxeof(rxr, count, &rx_done);
 
-	EM_TX_LOCK(txr);
+	EM_TX_LOCK_COND(txr, locking);
 	em_txeof(txr);
 #ifdef EM_MULTIQUEUE
 	if (!drbr_empty(ifp, txr->br))
@@ -1460,12 +1517,49 @@ em_poll(struct ifnet *ifp, enum poll_cmd cmd, int count)
 	if (!IFQ_DRV_IS_EMPTY(&ifp->if_snd))
 		em_start_locked(ifp, txr);
 #endif
-	EM_TX_UNLOCK(txr);
+	EM_TX_UNLOCK_COND(txr, locking);
 
 	return (rx_done);
 }
-#endif /* DEVICE_POLLING */
 
+static int
+em_poll(struct ifnet *ifp, enum poll_cmd cmd, int count)
+{
+
+	return (_em_poll_generic(ifp, cmd, count, 1));
+}
+#endif /* !DEVICE_POLLING && !NETDUMP_CLIENT */
+
+#ifdef NETDUMP_CLIENT
+static int
+em_poll_unlocked(struct ifnet *ifp, enum poll_cmd cmd, int count)
+{
+
+	return (_em_poll_generic(ifp, cmd, count, 0));
+}
+
+static void
+em_ndump_disable_intr(struct ifnet *ifp)
+{
+	struct adapter *adapter;
+
+	adapter = ifp->if_softc;
+	EM_CORE_LOCK(adapter);
+	em_disable_intr(adapter);
+	EM_CORE_UNLOCK(adapter);
+}
+
+static void
+em_ndump_enable_intr(struct ifnet *ifp)
+{
+	struct adapter *adapter;
+
+	adapter = ifp->if_softc;
+	EM_CORE_LOCK(adapter);
+	em_enable_intr(adapter);
+	EM_CORE_UNLOCK(adapter);
+}
+#endif /* !NETDUMP_CLIENT */
 
 /*********************************************************************
  *
@@ -2989,6 +3083,9 @@ em_setup_interface(device_t dev, struct adapter *adapter)
 	ifp->if_qflush = em_qflush;
 #else
 	ifp->if_start = em_start;
+#ifdef NETDUMP_CLIENT
+	ifp->if_ndumpfuncs = &em_ndump_methods;
+#endif
 	IFQ_SET_MAXLEN(&ifp->if_snd, adapter->num_tx_desc - 1);
 	ifp->if_snd.ifq_drv_maxlen = adapter->num_tx_desc - 1;
 	IFQ_SET_READY(&ifp->if_snd);
@@ -3880,6 +3977,10 @@ em_txeof(struct tx_ring *txr)
 				    BUS_DMASYNC_POSTWRITE);
 				bus_dmamap_unload(txr->txtag,
 				    tx_buffer->map);
+#ifdef NETDUMP_CLIENT
+				/*  Probably don't want to free this */
+				if ( panicstr == NULL )
+#endif
                         	m_freem(tx_buffer->m_head);
                         	tx_buffer->m_head = NULL;
                 	}
@@ -3962,6 +4063,12 @@ em_refresh_mbufs(struct rx_ring *rxr, int limit)
 	while (j != limit) {
 		rxbuf = &rxr->rx_buffers[i];
 		if (rxbuf->m_head == NULL) {
+#ifdef NETDUMP_CLIENT
+			/*  Use prealloced cluster */
+			if ( panicstr != NULL )
+				m = netdump_mbuf;
+			else
+#endif
 			m = m_getjcl(M_NOWAIT, MT_DATA,
 			    M_PKTHDR, adapter->rx_mbuf_sz);
 			/*
@@ -3985,6 +4092,9 @@ em_refresh_mbufs(struct rx_ring *rxr, int limit)
 		if (error != 0) {
 			printf("Refresh mbufs: hdr dmamap load"
 			    " failure - %d\n", error);
+#ifdef NETDUMP_CLIENT
+			if ( panicstr == NULL )
+#endif
 			m_free(m);
 			rxbuf->m_head = NULL;
 			goto update;
