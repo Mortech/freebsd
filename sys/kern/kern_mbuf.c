@@ -372,10 +372,6 @@ mbuf_init(void *dummy)
 
 	/* uma_prealloc() goes here... */
 
-#ifdef NETDUMP_CLIENT
-	/* TODO: Prealloc some mbuf clusters for use with netdump */
-
-#endif
 
 	/*
 	 * Hook event handler for low-memory situation, used to

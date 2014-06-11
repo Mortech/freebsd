@@ -59,6 +59,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/ptrace.h>
 #include <sys/kdb.h>
 #include <sys/kernel.h>
+#include <sys/kerneldump.h>
 #include <sys/ktr.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
@@ -119,6 +120,48 @@ systrace_probe_func_t	systrace_probe_func;
 dtrace_pid_probe_ptr_t		dtrace_pid_probe_ptr;
 dtrace_return_probe_ptr_t	dtrace_return_probe_ptr;
 #endif
+
+#include "opt_ddb.h"
+#include "opt_kdb.h"
+#include "opt_netdump.h"
+
+#include <sys/cdefs.h>
+#include <sys/param.h>
+#include <sys/conf.h>
+#include <sys/endian.h>
+#include <sys/eventhandler.h>
+#include <sys/kernel.h>
+#include <sys/kerneldump.h>
+#include <sys/mbuf.h>
+#include <sys/module.h>
+#include <sys/proc.h>
+#include <sys/protosw.h>
+#include <sys/reboot.h>
+#include <sys/socket.h>
+#include <sys/sysctl.h>
+#include <sys/systm.h>
+
+#include <net/ethernet.h>
+#include <net/if.h>
+#include <net/if_arp.h>
+#include <net/if_dl.h>
+#include <net/if_var.h>
+#include <net/route.h>
+
+#include <netinet/in.h>
+#include <netinet/in_systm.h>
+#include <netinet/in_var.h>
+#include <netinet/ip.h>
+#include <netinet/ip_var.h>
+#include <netinet/ip_options.h>
+#include <netinet/netdump.h>
+#include <netinet/udp.h>
+#include <netinet/udp_var.h>
+
+#include <machine/_inttypes.h>
+#include <machine/in_cksum.h>
+#include <machine/pcb.h>
+
 
 extern void trap(struct trapframe *frame);
 extern void syscall(struct trapframe *frame);
@@ -214,6 +257,15 @@ trap(struct trapframe *frame)
 #ifdef KDB
 	if (kdb_active) {
 		kdb_reenter();
+		goto out;
+	}
+#endif
+#ifdef NETDUMP_CLIENT
+	if (netdump_running){
+		printf("Netdump still running!\n\n");
+		netdump_running--;
+		//dumping--;
+		kdb_trap(type, 0, frame);
 		goto out;
 	}
 #endif

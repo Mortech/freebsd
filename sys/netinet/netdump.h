@@ -59,6 +59,8 @@ struct netdump_msg {
 	uint8_t		nm_data[NETDUMP_DATASIZE];
 };
 
+extern int netdump_running;
+
 #ifdef _KERNEL
 
 typedef void ndumplock_handler_t(struct ifnet *);

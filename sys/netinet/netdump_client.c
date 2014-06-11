@@ -123,7 +123,6 @@ static int	 sysctl_nic(SYSCTL_HANDLER_ARGS);
 
 static eventhandler_tag nd_tag = NULL;       /* record of our shutdown event */
 static uint32_t nd_seqno = 1;		     /* current sequence number */
-static uint64_t rcvd_acks;		     /* flags for out of order acks */
 static int dump_failed, have_server_mac;
 static uint16_t nd_server_port = NETDUMP_PORT; /* port to respond on */
 static unsigned char buf[MAXDUMPPGS*PAGE_SIZE]; /* Must be at least as big as
@@ -131,7 +130,7 @@ static unsigned char buf[MAXDUMPPGS*PAGE_SIZE]; /* Must be at least as big as
 						 * us */
 static struct ether_addr nd_gw_mac;
 
-static int nd_enable = 0;  /* if we should perform a network dump */
+static int nd_enable = 1;  /* if we should perform a network dump */
 static struct in_addr nd_server = {INADDR_ANY}; /* server address */
 static struct in_addr nd_client = {INADDR_ANY}; /* client (our) address */
 static struct in_addr nd_gw = {INADDR_ANY}; /* gw, if set */
@@ -145,6 +144,11 @@ static char nd_server_tun[INET_ADDRSTRLEN];
 static char nd_client_tun[INET_ADDRSTRLEN];
 static char nd_gw_tun[INET_ADDRSTRLEN];
 static char nd_nic_tun[IFNAMSIZ];
+
+//struct mbuf * netdump_m, *netdump_m2;
+//static int ref = 1;
+int recvd_ack;
+int netdump_running;
 
 /*
  * [netdump_supported_nic]
@@ -493,10 +497,10 @@ netdump_send_arp()
 
 	/* Fill-up a broadcast address. */
 	memset(&bcast, 0xFF, ETHER_ADDR_LEN);
-	//TODO: DON'T Call MGETHDR, use preallocced mbufs
+	//TODO: DON'T Call MGETHDR, use prealloced mbufs
 	MGETHDR(m, M_DONTWAIT, MT_DATA);
 	if (m == NULL) {
-		printf("netdump_send_arp: Out of mbufs");
+		printf("netdump_send_arp: Out of mbufs\n");
 		return ENOBUFS;
 	}
 	m->m_pkthdr.len = m->m_len = pktlen;
@@ -579,14 +583,16 @@ netdump_send(uint32_t type, off_t offset,
 	struct mbuf *m, *m2;
 	int retries = 0, polls, error;
 	uint32_t i, sent_so_far;
-	uint64_t want_acks=0;
 
-	rcvd_acks = 0;
-
-retransmit:
 	/* We might get chunks too big to fit in packets. Yuck. */
 	for (i=sent_so_far=0; sent_so_far < datalen || (i==0 && datalen==0);
 		i++) {
+		nd_seqno++;
+		recvd_ack=0;
+		retries=0;
+		polls=0;
+
+
 		uint32_t pktlen = datalen-sent_so_far;
 		/* First bound: the packet structure */
 		pktlen = min(pktlen, NETDUMP_DATASIZE);
@@ -594,14 +600,7 @@ retransmit:
 		pktlen = min(pktlen, nd_nic->if_mtu -
 				sizeof(struct udpiphdr) -
 				sizeof(struct netdump_msg_hdr));
-
-		/* Check if we're retransmitting and this has been ACKed
-		 * already */
-		if ((rcvd_acks & (1 << i)) != 0) {
-			sent_so_far += pktlen;
-			continue;
-		}
-
+retransmit:
 		/*
 		 * get and fill a header mbuf, then chain data as an extended
 		 * mbuf.
@@ -615,19 +614,22 @@ retransmit:
 		/* leave room for udpip */
 		MH_ALIGN(m, sizeof(struct netdump_msg_hdr));
 		nd_msg_hdr = mtod(m, struct netdump_msg_hdr *);
-		nd_msg_hdr->mh_seqno = htonl(nd_seqno+i);
+		nd_msg_hdr->mh_seqno = htonl(nd_seqno);
 		nd_msg_hdr->mh_type = htonl(type);
 		nd_msg_hdr->mh_offset = htobe64(offset + sent_so_far);
 		nd_msg_hdr->mh_len = htonl(pktlen);
 		nd_msg_hdr->mh__pad = 0;
 
 		if (pktlen) {
-			if ((m2 = m_get(M_DONTWAIT, MT_DATA)) == NULL) {
+			if ((m2=m_get(M_DONTWAIT, MT_DATA)) == NULL) {
+			//if (m2 == NULL) {
 				m_freem(m);
 				printf("netdump_send: Out of mbufs!\n");
 				return ENOBUFS;
 			}
+			//TODO: Avoid this call for external storage somehow
 			MEXTADD(m2, data+sent_so_far, pktlen, netdump_mbuf_nop,
+				//NULL, NULL, M_RDONLY, EXT_EXTREF);
 				NULL, NULL, M_RDONLY, EXT_MOD_TYPE);
 			m2->m_len = pktlen;
 			m->m_next = m2;
@@ -638,38 +640,28 @@ retransmit:
 			return error;
 		}
 
-		/* Note that we're waiting for this packet in the bitfield */
-		want_acks |= 1 << i;
+		/*
+		 * wait for ack. a *real* window would speed things up considerably.
+		 */
+		while (!recvd_ack) {		
+			if (polls++ > nd_polls) {
+				if (retries++ > nd_retries) {
+					return ETIMEDOUT; /* 10 s, no ack */
+				}
+				printf(". ");
+				goto retransmit; /* 1 s, no ack */
+			}
+			/*
+			 * this is not always necessary, but does no harm.
+			 */
+			netdump_network_poll();
+			DELAY(500); /* 0.5 ms */
+			goto retransmit;
+		}
 
+		//printf("nd_send: datalen = %d, sent=%d\n", datalen, sent_so_far);
 		sent_so_far += pktlen;
 	}
-
-	if (i >= sizeof(want_acks)*8) {
-		printf("Warning: Sent more than %zd packets (%d). "
-		       "Acknowledgements will fail unless the size of "
-		       "rcvd_acks/want_acks is increased.\n",
-		       sizeof(want_acks)*8, i);
-	}
-
-	/*
-	 * wait for acks. a *real* window would speed things up considerably.
-	 */
-	polls = 0;
-	while (rcvd_acks != want_acks) {		
-		if (polls++ > nd_polls) {
-			if (retries++ > nd_retries) {
-				return ETIMEDOUT; /* 10 s, no ack */
-			}
-			printf(". ");
-			goto retransmit; /* 1 s, no ack */
-		}
-		/*
-		 * this is not always necessary, but does no harm.
-		 */
-		netdump_network_poll();
-		DELAY(500); /* 0.5 ms */
-	}
-	nd_seqno += i;
 	return 0;
 }
 
@@ -785,13 +777,13 @@ nd_handle_ip(struct mbuf **mb)
 
 	/* Check that the source is the server's IP */
 	if (ip->ip_src.s_addr != nd_server.s_addr) {
-		NETDDEBUG("nd_handle_ip: Drop packet not from server\n");
+		//NETDDEBUG("nd_handle_ip: Drop packet not from server\n");
 		return;
 	}
 
 	/* Check if the destination IP is ours */
 	if (ip->ip_dst.s_addr != nd_client.s_addr) {
-		NETDDEBUGV("nd_handle_ip: Drop packet not to our IP\n");
+		//NETDDEBUGV("nd_handle_ip: Drop packet not to our IP\n");
 		return;
 	}
 
@@ -845,13 +837,14 @@ nd_handle_ip(struct mbuf **mb)
 	    nd_server_port = ntohs(udp->ui_u.uh_sport);
 	}
 
-	if (rcv_ackno >= nd_seqno+64) {
+	if (rcv_ackno > nd_seqno) {
 		printf("nd_handle_ip: ACK %d too far in future!\n", rcv_ackno);
 	} else if (rcv_ackno < nd_seqno) {
 		/* Do nothing: A duplicated past ACK */
 	} else {
 		/* We're interested in this ack. Record it. */
-		rcvd_acks |= 1 << (rcv_ackno-nd_seqno);
+		//printf("nd_handle_ip: ACK %d received!\n", rcv_ackno);
+		recvd_ack = 1;
 	}
 }
 
@@ -970,7 +963,7 @@ nd_handle_arp(struct mbuf **mb)
 	}
 
 	if (itaddr.s_addr != nd_client.s_addr) {
-		NETDDEBUG("nd_handle_arp: ignoring ARP not to our IP\n");
+		//NETDDEBUG("nd_handle_arp: ignoring ARP not to our IP\n");
 		return;
 	}
 
@@ -1131,6 +1124,8 @@ netdump_dumper(void *priv, void *virtual, vm_offset_t physical, off_t offset,
 		dump_failed=1;
 		return err;
 	}
+
+	//TODO: Free stuff here?
 	
 	return 0;
 }
@@ -1181,77 +1176,82 @@ netdump_trigger(void *arg, int howto)
 	 * Make sure, artificially, the dump context is set so a debugger
 	 * can find the stack trace.
 	 */
-	savectx(&dumppcb);
-	dumptid = curthread->td_tid;
-	dumping++;
+	printf("\nCall into trigger!\n");
+	if (!netdump_running){
+		savectx(&dumppcb);
+		dumptid = curthread->td_tid;
+		dumping++;
+		netdump_running++;
 
-	/*
-	 * nd_server_port could have switched after the first ack the
-	 * first time it gets called.  Adjust it accordingly.
-	 */
-	nd_server_port = NETDUMP_PORT;
-	if ((nd_nic->if_capenable & IFCAP_POLLING) == 0) {
+		/*
+		 * nd_server_port could have switched after the first ack the
+		 * first time it gets called.  Adjust it accordingly.
+		 */
+		nd_server_port = NETDUMP_PORT;
+		if ((nd_nic->if_capenable & IFCAP_POLLING) == 0) {
 #if defined(KDB) && !defined(KDB_UNATTENDED)
-		if (panicstr == NULL)
+			if (panicstr == NULL)
 #endif
-			nd_nic->if_ndumpfuncs->ne_disable_intr(nd_nic);
-	}
+				nd_nic->if_ndumpfuncs->ne_disable_intr(nd_nic);
+		}
 
-	/* Make the card use *our* receive callback */
-	old_if_input = nd_nic->if_input;
-	nd_nic->if_input = netdump_pkt_in;
+		/* Make the card use *our* receive callback */
+		old_if_input = nd_nic->if_input;
+		nd_nic->if_input = netdump_pkt_in;
 
-	if (nd_gw.s_addr == INADDR_ANY) {
-		nd_gw.s_addr = nd_server.s_addr;
-	}
-	printf("\n-----------------------------------\n");
-	printf("netdump in progress. searching for server.. ");
-	if (netdump_arp_server()) {
-		printf("Failed to locate server MAC address\n");
-		goto trig_abort;
-	}
-	if (netdump_send(NETDUMP_HERALD, 0, NULL, 0) != 0) {
-		printf("Failed to contact netdump server\n");
-		goto trig_abort;
-	}
-	printf("dumping to %s (%6D)\n", inet_ntoa(nd_server),
-			nd_gw_mac.octet, ":");
-	printf("-----------------------------------\n");
+		if (nd_gw.s_addr == INADDR_ANY) {
+			nd_gw.s_addr = nd_server.s_addr;
+		}
+		printf("\n-----------------------------------\n");
+		printf("netdump in progress. searching for server.. ");
+		if (netdump_arp_server()) {
+			printf("Failed to locate server MAC address\n");
+			goto trig_abort;
+		}
+		if (netdump_send(NETDUMP_HERALD, 0, NULL, 0) != 0) {
+			printf("Failed to contact netdump server\n");
+			goto trig_abort;
+		}
+		printf("dumping to %s (%6D)\n", inet_ntoa(nd_server),
+				nd_gw_mac.octet, ":");
+		printf("-----------------------------------\n");
 
-	/*
-	 * dump memory.
-	 */
-	dumper.dumper = netdump_dumper;
-	dumper.priv = NULL;
-	dumper.blocksize = NETDUMP_DATASIZE;
-	dumper.mediasize = 0;
-	dumper.mediaoffset = 0;
+		/*
+		 * dump memory.
+		 */
+		dumper.dumper = netdump_dumper;
+		dumper.priv = NULL;
+		dumper.blocksize = NETDUMP_DATASIZE;
+		dumper.mediasize = 0;
+		dumper.mediaoffset = 0;
 
-	/* in dump_machdep.c */
-	dumpsys(&dumper);
+		/* in dump_machdep.c */
+		dumpsys(&dumper);
 
-	if (dump_failed) {
-		printf("Failed to dump the actual raw datas\n");
-		goto trig_abort;
-	}
+		if (dump_failed) {
+			printf("Failed to dump the actual raw datas\n");
+			goto trig_abort;
+		}
 
-	if (netdump_send(NETDUMP_FINISHED, 0, NULL, 0) != 0) {
-		printf("Failed to close the transaction\n");
-		goto trig_abort;
-	}
-	printf("\nnetdump finished.\n");
-	printf("cancelling normal dump\n");
-	set_dumper(NULL, NULL);
+		if (netdump_send(NETDUMP_FINISHED, 0, NULL, 0) != 0) {
+			printf("Failed to close the transaction\n");
+			goto trig_abort;
+		}
+		printf("\nnetdump finished.\n");
+		printf("cancelling normal dump\n");
+		set_dumper(NULL, NULL);
 trig_abort:
-	if (old_if_input)
-		nd_nic->if_input = old_if_input;
-	if ((nd_nic->if_capenable & IFCAP_POLLING) == 0) {
+		if (old_if_input)
+			nd_nic->if_input = old_if_input;
+		if ((nd_nic->if_capenable & IFCAP_POLLING) == 0) {
 #if defined(KDB) && !defined(KDB_UNATTENDED)
-		if (panicstr == NULL)
+			if (panicstr == NULL)
 #endif
-			nd_nic->if_ndumpfuncs->ne_enable_intr(nd_nic);
+				nd_nic->if_ndumpfuncs->ne_enable_intr(nd_nic);
+		}
 	}
 	dumping--;
+	netdump_running--;
 }
 
 /*-
@@ -1276,11 +1276,29 @@ netdump_config_defaults()
 {
 	struct ifnet *ifn;
 	int found;
+	recvd_ack=0;
 
-	nd_nic = NULL;
-	nd_server.s_addr = INADDR_ANY;
-	nd_client.s_addr = INADDR_ANY;
-	nd_gw.s_addr = INADDR_ANY;
+	/* TODO: Prealloc some mbuf clusters for use with netdump 
+	*	These need to be freed somewhere!
+	*/
+	//netdump_m = m_gethdr(M_DONTWAIT, MT_DATA);
+	//netdump_m2 = m_get(M_DONTWAIT, MT_DATA);
+	//netdump_m2->m_ext.ref_cnt = &ref;
+
+	found = 0;
+	IFNET_RLOCK_NOSLEEP();
+	TAILQ_FOREACH(ifn, &V_ifnet, if_link) {
+		if (!strcmp(ifn->if_xname, "em0")) {
+			found = 1;
+			break;
+		}
+	}
+	IFNET_RUNLOCK_NOSLEEP();
+	if (found != 0 && netdump_supported_nic(ifn))
+		nd_nic = ifn;
+	inet_aton("10.7.216.1", &nd_gw);
+	inet_aton("10.7.216.88", &nd_client);
+	inet_aton("10.7.217.100", &nd_server);
 
 	if (nd_server_tun[0] != '\0')
 		inet_aton(nd_server_tun, &nd_server);

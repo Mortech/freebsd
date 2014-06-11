@@ -3978,11 +3978,16 @@ em_txeof(struct tx_ring *txr)
 				bus_dmamap_unload(txr->txtag,
 				    tx_buffer->map);
 #ifdef NETDUMP_CLIENT
-				/*  Probably don't want to free this */
-				if ( panicstr == NULL )
+				/*  TODO Probably don't want to free this */
+				//if ( panicstr == NULL ){
 #endif
                         	m_freem(tx_buffer->m_head);
                         	tx_buffer->m_head = NULL;
+#ifdef NETDUMP_CLIENT
+				//} else{
+					//tx_buffer->m_head = NULL;
+				//}
+#endif	
                 	}
 			tx_buffer->next_eop = -1;
 			txr->watchdog_time = ticks;
@@ -4032,7 +4037,7 @@ em_txeof(struct tx_ring *txr)
 	/* Disable watchdog if all clean */
 	if (txr->tx_avail == adapter->num_tx_desc) {
 		txr->queue_status = EM_QUEUE_IDLE;
-	} 
+	}
 }
 
 
@@ -4065,9 +4070,9 @@ em_refresh_mbufs(struct rx_ring *rxr, int limit)
 		if (rxbuf->m_head == NULL) {
 #ifdef NETDUMP_CLIENT
 			/*  Use prealloced cluster */
-			if ( panicstr != NULL )
-				m = netdump_mbuf;
-			else
+			//if ( panicstr != NULL )
+				//m = netdump_mbuf;
+			//else
 #endif
 			m = m_getjcl(M_NOWAIT, MT_DATA,
 			    M_PKTHDR, adapter->rx_mbuf_sz);
@@ -4093,7 +4098,7 @@ em_refresh_mbufs(struct rx_ring *rxr, int limit)
 			printf("Refresh mbufs: hdr dmamap load"
 			    " failure - %d\n", error);
 #ifdef NETDUMP_CLIENT
-			if ( panicstr == NULL )
+			//if ( panicstr == NULL )
 #endif
 			m_free(m);
 			rxbuf->m_head = NULL;
@@ -4528,6 +4533,7 @@ em_initialize_receive_unit(struct adapter *adapter)
 static bool
 em_rxeof(struct rx_ring *rxr, int count, int *done)
 {
+
 	struct adapter		*adapter = rxr->adapter;
 	struct ifnet		*ifp = adapter->ifp;
 	struct mbuf		*mp, *sendmp;
@@ -4572,7 +4578,10 @@ em_rxeof(struct rx_ring *rxr, int count, int *done)
 				rxr->discard = TRUE;
 			else
 				rxr->discard = FALSE;
-			em_rx_discard(rxr, i);
+#ifdef NETDUMP_CLIENT
+			//if (panicstr == NULL)
+#endif
+				em_rx_discard(rxr, i);
 			goto next_desc;
 		}
 		bus_dmamap_unload(rxr->rxtag, rxr->rx_buffers[i].map);
