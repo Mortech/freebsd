@@ -104,7 +104,7 @@ static time_t now;
 static time_t last_timeout_check;
 static int do_shutdown;
 static int sock;
-static uint32_t seq_no = 0;
+static uint32_t seq_no = 0; //TODO: Handle seq_no overflow, or else replace with actual TFTP code
 
 /* Daemon print functions hook. */
 static void (*phook)(int, const char *, ...);

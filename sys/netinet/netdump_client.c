@@ -145,10 +145,23 @@ static char nd_client_tun[INET_ADDRSTRLEN];
 static char nd_gw_tun[INET_ADDRSTRLEN];
 static char nd_nic_tun[IFNAMSIZ];
 
-//struct mbuf * netdump_m, *netdump_m2;
-//static int ref = 1;
+static int ref = 1;
 int recvd_ack;
 int netdump_running;
+
+
+//The idea behind these structures is that they are fixed-size free lists implemented as an array.
+//The ints tell us where the 'head' of the list is, ie, to the right is empty and to the left is other valid pointers if they exist.
+//Avoid wraparound! 
+
+int free_mtx_head = -1;
+int free_mtx2_head = -1;
+int free_mrx_head = -1;
+
+
+struct mbuf * free_mtx[16];
+struct mbuf * free_mtx2[16];
+struct mbuf * free_mrx[16];
 
 /*
  * [netdump_supported_nic]
@@ -490,7 +503,7 @@ netdump_udp_output(struct mbuf *m)
 static int
 netdump_send_arp()
 {
-	struct mbuf *m;
+	struct mbuf *m = NULL;
 	int pktlen = arphdr_len2(ETHER_ADDR_LEN, sizeof(struct in_addr));
 	struct arphdr *ah;
 	struct ether_addr bcast;
@@ -498,7 +511,12 @@ netdump_send_arp()
 	/* Fill-up a broadcast address. */
 	memset(&bcast, 0xFF, ETHER_ADDR_LEN);
 	//TODO: DON'T Call MGETHDR, use prealloced mbufs
-	MGETHDR(m, M_DONTWAIT, MT_DATA);
+	//MGETHDR(m, M_DONTWAIT, MT_DATA);
+	if (free_mtx_head > -1){
+		m = free_mtx[free_mtx_head];
+		free_mtx[free_mtx_head] = NULL;
+		free_mtx_head--;
+	}
 	if (m == NULL) {
 		printf("netdump_send_arp: Out of mbufs\n");
 		return ENOBUFS;
@@ -605,10 +623,15 @@ retransmit:
 		 * get and fill a header mbuf, then chain data as an extended
 		 * mbuf.
 		 */
-		MGETHDR(m, M_DONTWAIT, MT_DATA);
+		//MGETHDR(m, M_DONTWAIT, MT_DATA);
+		if (free_mtx_head > -1){
+			m = free_mtx[free_mtx_head];
+			free_mtx[free_mtx_head] = NULL;
+			free_mtx_head--;
+		}
 		if (m == NULL) {
 			printf("netdump_send: Out of mbufs!\n");
-			return ENOBUFS;
+			goto wait_for_ack;
 		}
 		m->m_pkthdr.len = m->m_len = sizeof(struct netdump_msg_hdr);
 		/* leave room for udpip */
@@ -621,28 +644,39 @@ retransmit:
 		nd_msg_hdr->mh__pad = 0;
 
 		if (pktlen) {
-			if ((m2=m_get(M_DONTWAIT, MT_DATA)) == NULL) {
-			//if (m2 == NULL) {
-				m_freem(m);
-				printf("netdump_send: Out of mbufs!\n");
-				return ENOBUFS;
+			//if ((m2=m_get(M_DONTWAIT, MT_DATA)) == NULL) {
+			if (free_mtx2_head > -1){
+				m2 = free_mtx2[free_mtx2_head];
+				free_mtx2[free_mtx2_head] = NULL;
+				free_mtx2_head--;
+			}
+			if (m2 == NULL) {
+				if (free_mtx_head + 1 < 16 && free_mtx[free_mtx_head+1] == NULL){
+					free_mtx_head = free_mtx_head+1;
+					free_mtx[free_mtx_head] = m;
+				}
+				printf("netdump_send: Out of mbufs! 2\n");
+				goto wait_for_ack;
 			}
 			//TODO: Avoid this call for external storage somehow
 			MEXTADD(m2, data+sent_so_far, pktlen, netdump_mbuf_nop,
-				//NULL, NULL, M_RDONLY, EXT_EXTREF);
-				NULL, NULL, M_RDONLY, EXT_MOD_TYPE);
+				NULL, NULL, M_RDONLY, EXT_EXTREF);
+				//NULL, NULL, M_RDONLY, EXT_MOD_TYPE);
 			m2->m_len = pktlen;
 			m->m_next = m2;
 			m->m_pkthdr.len += m2->m_len;
 		}
 
+		//printf("In UDP output:\n");
 		if ((error = netdump_udp_output(m)) != 0) {
 			return error;
 		}
-
+		//printf("Called UDP output\n");
 		/*
 		 * wait for ack. a *real* window would speed things up considerably.
 		 */
+wait_for_ack:
+		polls=0;
 		while (!recvd_ack) {		
 			if (polls++ > nd_polls) {
 				if (retries++ > nd_retries) {
@@ -654,12 +688,14 @@ retransmit:
 			/*
 			 * this is not always necessary, but does no harm.
 			 */
+			//printf("In net poll:\n");
 			netdump_network_poll();
+			//printf("called net poll\n");
 			DELAY(500); /* 0.5 ms */
-			goto retransmit;
+			//goto retransmit;
 		}
 
-		//printf("nd_send: datalen = %d, sent=%d\n", datalen, sent_so_far);
+		printf("nd_send: datalen = %d, sent=%d\n", datalen, sent_so_far);
 		sent_so_far += pktlen;
 	}
 	return 0;
@@ -1008,6 +1044,7 @@ netdump_pkt_in(struct ifnet *ifp, struct mbuf *m)
 	/* Ethernet processing */
 	if ((m->m_flags & M_PKTHDR) == 0) {
 		NETDDEBUG_IF(ifp, "discard frame w/o packet header\n");
+		//m = NULL;//TODO: THIS IS A TERRIBLE HACK
 		goto done;
 	}
 	if (m->m_len < ETHER_HDR_LEN) {
@@ -1016,6 +1053,7 @@ netdump_pkt_in(struct ifnet *ifp, struct mbuf *m)
 		goto done;
 	}
 	if (m->m_flags & M_HASFCS) {
+		printf("Call into HASFCS\n");
 		m_adj(m, -ETHER_CRC_LEN);
 		m->m_flags &= ~M_HASFCS;
 	}
@@ -1042,8 +1080,28 @@ netdump_pkt_in(struct ifnet *ifp, struct mbuf *m)
 			break;
 	}
 
-done:
-	if (m) m_freem(m);
+done: //TODO: This line is causing me a headache
+	if (m) {
+		struct mbuf * tmp = m;
+		//while (tmppkt != NULL){
+		//	struct mbuf * tmp = tmppkt;
+		//	while (tmp != NULL){
+				printf("head = %d\n", free_mrx_head);
+				if (free_mrx_head + 1 < 16 && free_mrx[free_mrx_head+1] == NULL){
+					free_mrx_head = free_mrx_head+1;
+					free_mrx[free_mrx_head] = tmp;
+					tmp->m_next=NULL;
+					tmp->m_nextpkt=NULL;
+				}
+		//		struct mbuf * tmp2 = tmp->m_next;
+		//		tmp->m_next = NULL;
+		//		tmp = tmp2;
+		//	}
+		//	struct mbuf * tmp2 = tmppkt->m_nextpkt;
+		//	tmppkt->m_nextpkt = NULL;
+		//	tmppkt = tmp2;
+		//}
+	}
 }
 
 /*
@@ -1125,7 +1183,7 @@ netdump_dumper(void *priv, void *virtual, vm_offset_t physical, off_t offset,
 		return err;
 	}
 
-	//TODO: Free stuff here?
+	//TODO: Free stuff here? Actually, this should happen after trigger, maybe?
 	
 	return 0;
 }
@@ -1280,10 +1338,25 @@ netdump_config_defaults()
 
 	/* TODO: Prealloc some mbuf clusters for use with netdump 
 	*	These need to be freed somewhere!
+	*
+	*	Make these into a proper free list!
+	* 	Instead of freeing mbufs, add them onto netdump's free list when netdumping.
+	*	pull from this list when sending. If out of mbufs, poll and wait.
+	* 	Can probably do a similar thing for received packets. Put that here too, probably.
 	*/
-	//netdump_m = m_gethdr(M_DONTWAIT, MT_DATA);
-	//netdump_m2 = m_get(M_DONTWAIT, MT_DATA);
-	//netdump_m2->m_ext.ref_cnt = &ref;
+	printf("Config called\n");
+
+	int i;
+	for(i=0; i<8; i++){
+		struct mbuf * tmp = m_gethdr(M_DONTWAIT, MT_DATA);
+		free_mtx[i] = tmp; //free_mtx_head is now an int indexing into an array of pointers free_mtx.
+		free_mtx_head=i;
+
+		tmp = m_get(M_DONTWAIT, MT_DATA);
+		tmp->m_ext.ref_cnt = &ref; //TODO: may need separate reference counts? Not likely
+		free_mtx2[i] = tmp;
+		free_mtx2_head=i;
+	}
 
 	found = 0;
 	IFNET_RLOCK_NOSLEEP();

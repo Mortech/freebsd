@@ -44,6 +44,7 @@
 #endif
 #endif
 
+
 /*
  * Mbufs are of a single size, MSIZE (sys/param.h), which includes overhead.
  * An mbuf may add a single "mbuf cluster" of size MCLBYTES (also in
@@ -624,6 +625,13 @@ m_init(struct mbuf *m, uma_zone_t zone, int size, int how, short type,
 static __inline struct mbuf *
 m_get(int how, short type)
 {
+#ifdef NETDUMP_CLIENT
+	KASSERT(panicstr == NULL, ("Call into mget while panicked."));
+	if (panicstr != NULL ){
+		struct mbuf * segymcfault = NULL;
+		segymcfault->m_len=42;
+	}
+#endif 
 	struct mb_args args;
 
 	args.flags = 0;
@@ -637,6 +645,13 @@ m_get(int how, short type)
 static __inline struct mbuf *
 m_getclr(int how, short type)
 {
+#ifdef NETDUMP_CLIENT
+	KASSERT(panicstr == NULL, ("Call into mget while panicked."));
+	if (panicstr != NULL ){
+		struct mbuf * segymcfault = NULL;
+		segymcfault->m_len=42;
+	}
+#endif 
 	struct mbuf *m;
 	struct mb_args args;
 
@@ -651,6 +666,13 @@ m_getclr(int how, short type)
 static __inline struct mbuf *
 m_gethdr(int how, short type)
 {
+#ifdef NETDUMP_CLIENT
+	KASSERT(panicstr == NULL, ("Call into mget while panicked."));
+	if (panicstr != NULL ){
+		struct mbuf * segymcfault = NULL;
+		segymcfault->m_len=42;
+	}
+#endif 
 	struct mb_args args;
 
 	args.flags = M_PKTHDR;
@@ -661,6 +683,13 @@ m_gethdr(int how, short type)
 static __inline struct mbuf *
 m_getcl(int how, short type, int flags)
 {
+#ifdef NETDUMP_CLIENT
+	KASSERT(panicstr == NULL, ("Call into mget while panicked."));
+	if (panicstr != NULL ){
+		struct mbuf * segymcfault = NULL;
+		segymcfault->m_len=42;
+	}
+#endif 
 	struct mb_args args;
 
 	args.flags = flags;
@@ -671,7 +700,13 @@ m_getcl(int how, short type, int flags)
 static __inline void
 m_clget(struct mbuf *m, int how)
 {
-
+#ifdef NETDUMP_CLIENT
+	KASSERT(panicstr == NULL, ("Call into mget while panicked."));
+	if (panicstr != NULL ){
+		struct mbuf * segymcfault = NULL;
+		segymcfault->m_len=42;
+	}
+#endif 
 	if (m->m_flags & M_EXT)
 		printf("%s: %p mbuf already has cluster\n", __func__, m);
 	m->m_ext.ext_buf = (char *)NULL;
@@ -697,7 +732,13 @@ static __inline void *
 m_cljget(struct mbuf *m, int how, int size)
 {
 	uma_zone_t zone;
-
+#ifdef NETDUMP_CLIENT
+	KASSERT(panicstr == NULL, ("Call into mget while panicked."));
+	if (panicstr != NULL ){
+		struct mbuf * segymcfault = NULL;
+		segymcfault->m_len=42;
+	}
+#endif 
 	if (m && m->m_flags & M_EXT)
 		printf("%s: %p mbuf already has cluster\n", __func__, m);
 	if (m != NULL)
@@ -1137,6 +1178,15 @@ m_tag_find(struct mbuf *m, int type, struct m_tag *start)
 static __inline struct mbuf *
 m_free(struct mbuf *m)
 {
+	//TODO: Netdump check and add to netdump free list?
+#ifdef NETDUMP_CLIENT
+	KASSERT(panicstr == NULL, ("Call into mfree while panicked."));
+	if (panicstr != NULL ){
+		struct mbuf * segymcfault = NULL;
+		segymcfault->m_len=42;
+	}
+#endif
+
 	struct mbuf *n = m->m_next;
 
 	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE))

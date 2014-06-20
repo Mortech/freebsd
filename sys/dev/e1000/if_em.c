@@ -122,10 +122,6 @@ int	em_display_debug_stats = 0;
  *********************************************************************/
 char em_driver_version[] = "7.3.8";
 
-#ifdef NETDUMP_CLIENT
-struct mbuf * netdump_mbuf;
-#endif
-
 /*********************************************************************
  *  PCI Device ID Table
  *
@@ -1394,16 +1390,6 @@ em_init_locked(struct adapter *adapter)
 		adapter->rx_mbuf_sz = MJUMPAGESIZE;
 	else
 		adapter->rx_mbuf_sz = MJUM9BYTES;
-
-#ifdef NETDUMP_CLIENT
-	/* TODO: If setting this up here, should 
-	*	check to see if it exists already first.
-	*	Also, this needs to be freed at some point!
-	*/
-	/*  Setup cluster for use later */
-	netdump_mbuf = m_getjcl(M_NOWAIT, MT_DATA,
-			    M_PKTHDR, adapter->rx_mbuf_sz);
-#endif
 
 	/* Prepare receive descriptors and buffers */
 	if (em_setup_receive_structures(adapter)) {
@@ -3978,16 +3964,11 @@ em_txeof(struct tx_ring *txr)
 				bus_dmamap_unload(txr->txtag,
 				    tx_buffer->map);
 #ifdef NETDUMP_CLIENT
-				/*  TODO Probably don't want to free this */
-				//if ( panicstr == NULL ){
+				//Don't free this
+
 #endif
                         	m_freem(tx_buffer->m_head);
                         	tx_buffer->m_head = NULL;
-#ifdef NETDUMP_CLIENT
-				//} else{
-					//tx_buffer->m_head = NULL;
-				//}
-#endif	
                 	}
 			tx_buffer->next_eop = -1;
 			txr->watchdog_time = ticks;
@@ -4070,9 +4051,6 @@ em_refresh_mbufs(struct rx_ring *rxr, int limit)
 		if (rxbuf->m_head == NULL) {
 #ifdef NETDUMP_CLIENT
 			/*  Use prealloced cluster */
-			//if ( panicstr != NULL )
-				//m = netdump_mbuf;
-			//else
 #endif
 			m = m_getjcl(M_NOWAIT, MT_DATA,
 			    M_PKTHDR, adapter->rx_mbuf_sz);
@@ -4098,7 +4076,7 @@ em_refresh_mbufs(struct rx_ring *rxr, int limit)
 			printf("Refresh mbufs: hdr dmamap load"
 			    " failure - %d\n", error);
 #ifdef NETDUMP_CLIENT
-			//if ( panicstr == NULL )
+			/*  Use prealloced cluster */
 #endif
 			m_free(m);
 			rxbuf->m_head = NULL;
@@ -4578,10 +4556,7 @@ em_rxeof(struct rx_ring *rxr, int count, int *done)
 				rxr->discard = TRUE;
 			else
 				rxr->discard = FALSE;
-#ifdef NETDUMP_CLIENT
-			//if (panicstr == NULL)
-#endif
-				em_rx_discard(rxr, i);
+			em_rx_discard(rxr, i);
 			goto next_desc;
 		}
 		bus_dmamap_unload(rxr->rxtag, rxr->rx_buffers[i].map);
@@ -4676,6 +4651,9 @@ em_rx_discard(struct rx_ring *rxr, int i)
 	/* Free any previous pieces */
 	if (rxr->fmp != NULL) {
 		rxr->fmp->m_flags |= M_PKTHDR;
+#ifdef NETDUMP_CLIENT
+		/*  Use prealloced cluster */
+#endif
 		m_freem(rxr->fmp);
 		rxr->fmp = NULL;
 		rxr->lmp = NULL;
@@ -4685,6 +4663,9 @@ em_rx_discard(struct rx_ring *rxr, int i)
 	** to clean up and recharge buffer.
 	*/
 	if (rbuf->m_head) {
+#ifdef NETDUMP_CLIENT
+		/*  Use prealloced cluster */
+#endif
 		m_free(rbuf->m_head);
 		rbuf->m_head = NULL;
 	}

@@ -103,6 +103,13 @@ m_get2(int size, int how, short type, int flags)
 
 	args.flags = flags;
 	args.type = type;
+#ifdef NETDUMP_CLIENT
+	KASSERT(panicstr == NULL, ("Call into mget while panicked."));
+	if (panicstr != NULL){
+		struct mbuf * segymcfault = NULL;
+		segymcfault->m_len=42;
+	}
+#endif 
 
 	if (size <= MHLEN || (size <= MLEN && (flags & M_PKTHDR) == 0))
 		return (uma_zalloc_arg(zone_mbuf, &args, how));
@@ -135,7 +142,13 @@ m_getjcl(int how, short type, int flags, int size)
 	struct mb_args args;
 	struct mbuf *m, *n;
 	uma_zone_t zone;
-
+#ifdef NETDUMP_CLIENT
+	KASSERT(panicstr == NULL, ("Call into mget while panicked."));
+	if (panicstr != NULL){
+		struct mbuf * segymcfault = NULL;
+		segymcfault->m_len=42;
+	}
+#endif 
 	if (size == MCLBYTES)
 		return m_getcl(how, type, flags);
 
@@ -168,7 +181,13 @@ m_getm2(struct mbuf *m, int len, int how, short type, int flags)
 	struct mbuf *mb, *nm = NULL, *mtail = NULL;
 
 	KASSERT(len >= 0, ("%s: len is < 0", __func__));
-
+#ifdef NETDUMP_CLIENT
+	KASSERT(panicstr == NULL, ("Call into mget while panicked."));
+	if (panicstr != NULL){
+		struct mbuf * segymcfault = NULL;
+		segymcfault->m_len=42;
+	}
+#endif 
 	/* Validate flags. */
 	flags &= (M_PKTHDR | M_EOR);
 
@@ -227,7 +246,13 @@ m_getm2(struct mbuf *m, int len, int how, short type, int flags)
 void
 m_freem(struct mbuf *mb)
 {
-
+#ifdef NETDUMP_CLIENT
+	KASSERT(panicstr == NULL, ("Call into mfree while panicked."));
+	if (panicstr != NULL){
+		struct mbuf * segymcfault = NULL;
+		segymcfault->m_len=42;
+	}
+#endif 
 	while (mb != NULL)
 		mb = m_free(mb);
 }
