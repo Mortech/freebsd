@@ -3200,7 +3200,7 @@ lem_get_buf(struct adapter *adapter, int i)
 #ifdef NETDUMP_CLIENT
 			/*  Use prealloced cluster */
 			if ( netdump_running ) {
-				m = netdump_alloc(6);
+				m = netdump_alloc(EXT_PACKET);
 			} else {
 #endif
 			m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);

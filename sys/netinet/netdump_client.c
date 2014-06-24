@@ -149,18 +149,17 @@ int recvd_ack;
 int netdump_running;
 
 
-//The idea behind these structures is that they are fixed-size free lists implemented as an array.
-//The ints tell us where the 'head' of the list is, ie, to the right is empty and to the left is other valid pointers if they exist.
-//Avoid wraparound! 
+//TODO: Use lists, not arrays. Reuse rxbufs?
 
-//int txlist_head = -1;
-//int rxlist_head = -1;
+int txlist_head = -1;
+int rxlist_head = -1;
+int txlist2_head = -1;
 #define RESERVED 4
-#define RESERVEDRX 32
+#define RESERVEDRX 16
 
-struct mbuf * txlist[RESERVED]; // m2
-struct mbuf * txlist2[RESERVED]; // m
-struct mbuf * rxlist[RESERVEDRX]; // pkt_in (6)
+struct mbuf * txlist[RESERVED]; // m
+struct mbuf * txlist2[RESERVED]; // m2
+struct mbuf * rxlist[RESERVEDRX]; // pkt_in (6) EXT_PACKET
 void * extlisttx[RESERVED];
 void * extlistrx[RESERVEDRX];
 int reflisttx[RESERVED];
@@ -186,7 +185,30 @@ int reflistrx[RESERVEDRX];
 		struct mbuf * tmp = tmppkt;
 		struct mbuf * tmp2 = tmppkt->m_nextpkt;
 		while (tmp != NULL){
-			struct mbuf * tmp3 = tmp->m_next;/*
+			struct mbuf * tmp3 = tmp->m_next;
+			switch(tmp->m_ext.ext_type){
+		 		case EXT_EXTREF: //m2
+		 			NETDDEBUG("m2\n");
+		 			if (txlist2_head + 1 < RESERVED && txlist2[txlist2_head+1] == NULL){
+		 				txlist2_head = txlist2_head+1;
+						txlist2[txlist2_head] = tmp;
+					}
+					break;
+		 		case EXT_MOD_TYPE: //m
+		 			NETDDEBUG("m\n");
+		 			if (txlist_head + 1 < RESERVED && txlist[txlist_head+1] == NULL){
+		 				txlist_head = txlist_head+1;
+						txlist[txlist_head] = tmp;
+					}
+					break;
+		 		case EXT_PACKET:
+		 			NETDDEBUG("rx\n");
+				 	if (rxlist_head + 1 < RESERVEDRX && rxlist[rxlist_head+1] == NULL){
+		 				rxlist_head = rxlist_head+1;
+						rxlist[rxlist_head] = tmp;
+					}
+			}
+			/*
 			for (head=0; head<RESERVED; head++){
 				if (txlist[head] == tmp){
 					reflisttx[head] -= 1;
@@ -196,8 +218,8 @@ int reflistrx[RESERVEDRX];
 					reflistrx[head] -= 1;
 				}
 			}*/
-			if (tmp->m_ext.ref_cnt != NULL)
-				*(tmp->m_ext.ref_cnt) -= 1;
+			//if (tmp->m_ext.ref_cnt != NULL)
+			//	*(tmp->m_ext.ref_cnt) -= 1;
 /*
 			tmp->m_ext.ext_buf = NULL;
 			tmp->m_ext.ext_free = NULL;
@@ -228,34 +250,28 @@ int reflistrx[RESERVEDRX];
  *	struct mbuf * A pointer to the requested mbuf
  */
  struct mbuf *
- netdump_alloc(short type){ //TODO: rejoin ext, CAUTION: Can I use ref_cnt this way??
+ netdump_alloc(short type){ //TODO: 
  	struct mbuf * m = NULL;
- 	int head;
  	switch(type){
- 		case EXT_MOD_TYPE:
- 			for (head = 0;  head<RESERVED; head++){
- 				if (reflisttx[head] == 0){
- 					m = txlist[head];
-					reflisttx[head] += 1;
- 					break;
- 				}
+ 		case EXT_EXTREF: //m2
+ 			if (txlist2_head > -1){
+				m = txlist2[txlist2_head];
+				txlist2[txlist2_head] = NULL;
+				txlist2_head--;
 			}
 			break;
- 		case EXT_EXTREF:
- 			for (head = 0;  head<RESERVED; head++){
- 				if (reflisttx2[head] == 0){
- 					m = txlist2[head];
-					reflisttx2[head] += 1;
- 					break;
- 				}
+ 		case EXT_MOD_TYPE: //m
+ 			if (txlist_head > -1){
+				m = txlist[txlist_head];
+				txlist[txlist_head] = NULL;
+				txlist_head--;
 			}
- 		default:
-		 	for (head = 0;  head<RESERVEDRX; head++){
- 				if (reflistrx[head] == 0){
- 					m = rxlist[head];
-					reflistrx[head] += 1;
- 					break;
- 				}
+			break;
+ 		default: //rx
+		 	if (rxlist_head > -1){
+				m = rxlist[rxlist_head];
+				rxlist[rxlist_head] = NULL;
+				rxlist_head--;
 			}
 	}
 	return m;
@@ -608,7 +624,7 @@ netdump_send_arp()
 
 	/* Fill-up a broadcast address. */
 	memset(&bcast, 0xFF, ETHER_ADDR_LEN);
-	m = netdump_alloc(EXT_EXTREF);
+	m = netdump_alloc(EXT_MOD_TYPE);
 	if (m == NULL) {
 		printf("netdump_send_arp: Out of mbufs\n");
 		return ENOBUFS;
@@ -715,7 +731,7 @@ retransmit:
 		 * get and fill a header mbuf, then chain data as an extended
 		 * mbuf.
 		 */
-		m = netdump_alloc(EXT_EXTREF);
+		m = netdump_alloc(EXT_MOD_TYPE);
 		if (m == NULL) {
 			printf("netdump_send: Out of mbufs!\n");
 			goto wait_for_ack;
@@ -731,7 +747,7 @@ retransmit:
 		nd_msg_hdr->mh__pad = 0;
 
 		if (pktlen) {
-			if ((m2=netdump_alloc(EXT_MOD_TYPE)) == NULL) {
+			if ((m2=netdump_alloc(EXT_EXTREF)) == NULL) {
 				netdump_free(m);
 				printf("netdump_send: Out of mbufs! 2\n");
 				goto wait_for_ack;
@@ -1399,24 +1415,30 @@ netdump_config_defaults()
 	*/
 
 	int i;
-	for(i=0; i<RESERVED || i <RESERVEDRX; i++){
-		//TODO: separate list for external storage
+	for(i=0; i<RESERVED || i <RESERVEDRX/2; i++){
+		//TODO: reflist and extlist
 		if (i<RESERVED){
-			struct mbuf * tmp = m_get(M_DONTWAIT, MT_DATA);
-			tmp->m_ext.ref_cnt = &reflisttx[i];
-			reflisttx[i] = 0;
-			txlist[i] = tmp;
-			
-			tmp = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
-			tmp->m_ext.ref_cnt = &reflisttx2[i];
-			reflisttx2[i] = 0;
-			txlist2[i] = tmp;
-		}
-		if (i<RESERVEDRX){
 			struct mbuf * tmp = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
-			tmp->m_ext.ref_cnt = &reflistrx[i];
-			reflistrx[i] = 0;
+			tmp->m_ext.ref_cnt = &reflisttx[i];
+			tmp->m_ext.ext_type = EXT_MOD_TYPE;
+			reflisttx[i] = 1;
+			txlist[i] = tmp;
+			txlist_head = i;
+			
+			tmp = m_get(M_DONTWAIT, MT_DATA);
+			tmp->m_ext.ref_cnt = &reflisttx2[i];
+			tmp->m_ext.ext_type = EXT_EXTREF;
+			reflisttx2[i] = 1;
+			txlist2[i] = tmp;
+			txlist2_head = i;
+		}
+		if (i<RESERVEDRX/2){
+			struct mbuf * tmp = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
+			//tmp->m_ext.ref_cnt = &reflistrx[i];
+			//reflistrx[i] = 0;
+
 			rxlist[i] = tmp;
+			rxlist_head = i;
 		}
 	}
 
