@@ -3963,10 +3963,6 @@ em_txeof(struct tx_ring *txr)
 				    BUS_DMASYNC_POSTWRITE);
 				bus_dmamap_unload(txr->txtag,
 				    tx_buffer->map);
-#ifdef NETDUMP_CLIENT
-				//Don't free this
-
-#endif
                         	m_freem(tx_buffer->m_head);
                         	tx_buffer->m_head = NULL;
                 	}
@@ -4049,9 +4045,6 @@ em_refresh_mbufs(struct rx_ring *rxr, int limit)
 	while (j != limit) {
 		rxbuf = &rxr->rx_buffers[i];
 		if (rxbuf->m_head == NULL) {
-#ifdef NETDUMP_CLIENT
-			/*  Use prealloced cluster */
-#endif
 			m = m_getjcl(M_NOWAIT, MT_DATA,
 			    M_PKTHDR, adapter->rx_mbuf_sz);
 			/*
@@ -4075,9 +4068,6 @@ em_refresh_mbufs(struct rx_ring *rxr, int limit)
 		if (error != 0) {
 			printf("Refresh mbufs: hdr dmamap load"
 			    " failure - %d\n", error);
-#ifdef NETDUMP_CLIENT
-			/*  Use prealloced cluster */
-#endif
 			m_free(m);
 			rxbuf->m_head = NULL;
 			goto update;
@@ -4651,9 +4641,6 @@ em_rx_discard(struct rx_ring *rxr, int i)
 	/* Free any previous pieces */
 	if (rxr->fmp != NULL) {
 		rxr->fmp->m_flags |= M_PKTHDR;
-#ifdef NETDUMP_CLIENT
-		/*  Use prealloced cluster */
-#endif
 		m_freem(rxr->fmp);
 		rxr->fmp = NULL;
 		rxr->lmp = NULL;
@@ -4663,9 +4650,6 @@ em_rx_discard(struct rx_ring *rxr, int i)
 	** to clean up and recharge buffer.
 	*/
 	if (rbuf->m_head) {
-#ifdef NETDUMP_CLIENT
-		/*  Use prealloced cluster */
-#endif
 		m_free(rbuf->m_head);
 		rbuf->m_head = NULL;
 	}

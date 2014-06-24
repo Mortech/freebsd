@@ -60,18 +60,13 @@ struct netdump_msg {
 };
 
 extern int netdump_running;
-extern int free_mtx_head;
-extern int free_mtx2_head;
-extern int free_mrx_head;
-
-
-extern struct mbuf * free_mtx[16];
-extern struct mbuf * free_mtx2[16];
-extern struct mbuf * free_mrx[16];
 
 #ifdef _KERNEL
 
 typedef void ndumplock_handler_t(struct ifnet *);
+
+void netdump_free(struct mbuf *);
+struct mbuf * netdump_alloc(short type);
 
 struct netdump_methods {
 	poll_handler_t		*ne_poll_locked;

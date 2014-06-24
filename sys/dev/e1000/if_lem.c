@@ -1209,21 +1209,6 @@ lem_init_locked(struct adapter *adapter)
 	/* Setup Multicast table */
 	lem_set_multi(adapter);
 
-#ifdef NETDUMP_CLIENT
-	/* TODO: If setting this up here, should 
-	*	check to see if it exists already first.
-	*	Set up free list
-	*/
-	int i;
-	if (free_mrx[0] == NULL){
-		for(i=0; i<8; i++){
-			struct mbuf * tmp = m_getcl(M_NOWAIT, MT_DATA,
-				    M_PKTHDR);
-			free_mrx[i] = tmp;
-			free_mrx_head = i;
-		}
-	}
-#endif
 
 	/* Prepare receive descriptors and buffers */
 	if (lem_setup_receive_structures(adapter)) {
@@ -3129,25 +3114,7 @@ lem_txeof(struct adapter *adapter)
 #ifdef NETDUMP_CLIENT
 				/*  TODO Check for tx vs tx2 */
 				if ( netdump_running ) {
-					struct mbuf * m = tx_buffer->m_head;
-					while (m!=NULL){
-						struct mbuf * tmp = m->m_next;
-						m->m_next=NULL;
-						if (m->m_flags & M_EXT){
-							printf("m2\n");
-							if (free_mtx2_head+1 < 16 && free_mtx2[free_mtx2_head+1] == NULL){
-								free_mtx2_head = free_mtx2_head+1;
-								free_mtx2[free_mtx2_head] = m;
-							}
-						} else{
-							printf("m1\n");
-							if (free_mtx_head + 1 < 16 && free_mtx[free_mtx_head+1] == NULL){
-								free_mtx_head = free_mtx_head+1;
-								free_mtx[free_mtx_head] = m;
-							}
-						}
-						m=tmp;
-					}
+					netdump_free(tx_buffer->m_head);
 					tx_buffer->m_head = NULL;
 				} else {
 
@@ -3233,11 +3200,7 @@ lem_get_buf(struct adapter *adapter, int i)
 #ifdef NETDUMP_CLIENT
 			/*  Use prealloced cluster */
 			if ( netdump_running ) {
-				if (free_mrx_head > -1){
-					m = free_mrx[free_mrx_head];
-					free_mrx[free_mrx_head] = NULL;
-					free_mrx_head--;
-				}
+				m = netdump_alloc(6);
 			} else {
 #endif
 			m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
@@ -3726,24 +3689,7 @@ discard:
 #ifdef NETDUMP_CLIENT
 				/*  Use prealloced cluster */
 				if ( netdump_running ) {
-					struct mbuf * tmp = adapter->fmp;
-					//while (tmppkt != NULL){
-					//	struct mbuf * tmp = tmppkt;
-					//	while (tmp != NULL){
-							if (free_mrx_head + 1 < 16 && free_mrx[free_mrx_head+1] == NULL){
-								free_mrx_head = free_mrx_head+1;
-								free_mrx[free_mrx_head] = tmp;
-								tmp->m_next=NULL;
-								tmp->m_nextpkt=NULL;
-							}
-					//		struct mbuf * tmp2 = tmp->m_next;
-					//		tmp->m_next = NULL;
-					//		tmp = tmp2;
-					//	}
-					//	struct mbuf * tmp2 = tmppkt->m_nextpkt;
-					//	tmppkt->m_nextpkt = NULL;
-					//	tmppkt = tmp2;
-					//}
+					netdump_free(adapter->fmp);
 				} else {
 #endif
 				m_freem(adapter->fmp);
