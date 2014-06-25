@@ -162,9 +162,13 @@ struct mbuf * txlist2[RESERVED]; // m2
 struct mbuf * rxlist[RESERVEDRX]; // pkt_in (6) EXT_PACKET
 void * extlisttx[RESERVED];
 void * extlistrx[RESERVEDRX];
-int reflisttx[RESERVED];
-int reflisttx2[RESERVED];
-int reflistrx[RESERVEDRX];
+volatile u_int * reflisttx[RESERVED];
+volatile u_int * reflisttx2[RESERVED];
+volatile u_int * reflistrx[RESERVEDRX];
+int sizelisttx[RESERVED];
+int sizelistrx[RESERVEDRX];
+
+int refilisttx2[RESERVED];
 
 /*
  * [netdump_free]
@@ -189,9 +193,13 @@ int reflistrx[RESERVEDRX];
 			switch(tmp->m_ext.ext_type){
 		 		case EXT_EXTREF: //m2
 		 			NETDDEBUG("m2\n");
+		 			//If room on end of array, append to it
 		 			if (txlist2_head + 1 < RESERVED && txlist2[txlist2_head+1] == NULL){
 		 				txlist2_head = txlist2_head+1;
 						txlist2[txlist2_head] = tmp;
+						//No need to save external memory, just refcount TODO: check refcount
+						*(tmp->m_ext.ref_cnt) -= 1;
+						reflisttx2[txlist2_head] = tmp->m_ext.ref_cnt;
 					}
 					break;
 		 		case EXT_MOD_TYPE: //m
@@ -199,37 +207,43 @@ int reflistrx[RESERVEDRX];
 		 			if (txlist_head + 1 < RESERVED && txlist[txlist_head+1] == NULL){
 		 				txlist_head = txlist_head+1;
 						txlist[txlist_head] = tmp;
+						//put external memory and refcount into correct lists
+						*(tmp->m_ext.ref_cnt) -= 1;
+						reflisttx[txlist_head] = tmp->m_ext.ref_cnt;
+						extlisttx[txlist_head] = tmp->m_ext.ext_buf;
+						sizelisttx[txlist_head] = tmp->m_ext.ext_size;
 					}
 					break;
 		 		case EXT_PACKET:
-		 			NETDDEBUG("rx\n");
+		 			//NETDDEBUG("rx\n");
 				 	if (rxlist_head + 1 < RESERVEDRX && rxlist[rxlist_head+1] == NULL){
 		 				rxlist_head = rxlist_head+1;
 						rxlist[rxlist_head] = tmp;
+						//Same as m
+						*(tmp->m_ext.ref_cnt) -= 1;
+						reflistrx[rxlist_head] = tmp->m_ext.ref_cnt;
+						extlistrx[rxlist_head] = tmp->m_ext.ext_buf;
+						sizelistrx[rxlist_head] = tmp->m_ext.ext_size;
 					}
+				case default:
+					//TODO: Imitate zfree better
+					break;
 			}
-			/*
-			for (head=0; head<RESERVED; head++){
-				if (txlist[head] == tmp){
-					reflisttx[head] -= 1;
-				} else if (txlist2[head] == tmp){
-					reflisttx2[head] -= 1;
-				} else if (rxlist[head] == tmp){
-					reflistrx[head] -= 1;
-				}
-			}*/
-			//if (tmp->m_ext.ref_cnt != NULL)
-			//	*(tmp->m_ext.ref_cnt) -= 1;
-/*
-			tmp->m_ext.ext_buf = NULL;
-			tmp->m_ext.ext_free = NULL;
-			tmp->m_ext.ext_arg1 = NULL;
-			tmp->m_ext.ext_arg2 = NULL;
-			tmp->m_ext.ext_size = 0;//TODO: want this saved
-			tmp->m_ext.ext_type = 0;//TODO: want this saved
-			tmp->m_ext.ext_flags = 0;
-			tmp->m_flags &= ~M_EXT;
-*/
+			if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ //mb_free_ext
+				tmp->m_ext.ext_buf = NULL;// saved in extlist
+				tmp->m_ext.ext_free = NULL;
+				tmp->m_ext.ext_arg1 = NULL;
+				tmp->m_ext.ext_arg2 = NULL;
+				tmp->m_ext.ext_size = 0;// saved in sizelist
+				tmp->m_ext.ext_type = 0;//This is given as an arg to netdump_alloc
+				tmp->m_ext.ref_cnt = NULL; //Saved in ref_cnt list
+				tmp->m_ext.ext_flags = 0;
+				tmp->m_flags &= ~M_EXT; //reset in alloc 
+			}
+			if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ //uma_zfree
+				NETDDEBUG("Found tags for some reason\n");
+				tmp->m_pkthdr.tags.slh_first=NULL; //If we have tags for some reason, leak them
+			}
 			tmp = tmp3;
 		}
 		tmppkt = tmp2;
@@ -250,28 +264,51 @@ int reflistrx[RESERVEDRX];
  *	struct mbuf * A pointer to the requested mbuf
  */
  struct mbuf *
- netdump_alloc(short type){ //TODO: 
+ netdump_alloc(short type){ //TODO: Probably want to reset mh_data to point at correct place
  	struct mbuf * m = NULL;
  	switch(type){
  		case EXT_EXTREF: //m2
  			if (txlist2_head > -1){
 				m = txlist2[txlist2_head];
+				m->m_ext.ref_cnt = reflisttx2[txlist2_head];
+				reflisttx2[txlist2_head] = NULL;
+				*(m->m_ext.ref_cnt) += 1;
 				txlist2[txlist2_head] = NULL;
 				txlist2_head--;
+				m->m_ext.ext_type=type;
+				m->m_flags |= M_EXT;
 			}
 			break;
  		case EXT_MOD_TYPE: //m
  			if (txlist_head > -1){
 				m = txlist[txlist_head];
+				m->m_ext.ref_cnt = reflisttx[txlist_head];
+				reflisttx[txlist_head] = NULL;
+				m->m_ext.ext_buf = extlisttx[txlist_head];
+				extlisttx[txlist_head] = NULL;
+				m->m_ext.ext_size = sizelisttx[txlist_head];
+				sizelisttx[txlist_head] = 0;
+				*(m->m_ext.ref_cnt) += 1;
 				txlist[txlist_head] = NULL;
 				txlist_head--;
+				m->m_ext.ext_type=type;
+				m->m_flags |= M_EXT;
 			}
 			break;
- 		default: //rx
+ 		case EXT_PACKET: //rx
 		 	if (rxlist_head > -1){
 				m = rxlist[rxlist_head];
+				m->m_ext.ref_cnt = reflistrx[rxlist_head];
+				reflistrx[rxlist_head] = NULL;
+				m->m_ext.ext_buf = extlistrx[rxlist_head];
+				extlistrx[rxlist_head] = NULL;
+				m->m_ext.ext_size = sizelistrx[rxlist_head];
+				sizelistrx[rxlist_head] = 0;
+				*(m->m_ext.ref_cnt) += 1;
 				rxlist[rxlist_head] = NULL;
 				rxlist_head--;
+				m->m_ext.ext_type=type;
+				m->m_flags |= M_EXT;
 			}
 	}
 	return m;
@@ -752,7 +789,7 @@ retransmit:
 				printf("netdump_send: Out of mbufs! 2\n");
 				goto wait_for_ack;
 			}
-			//TODO: Something?
+			//TODO: Instead of separate lists, maybe free ext separately and call that here
 			MEXTADD(m2, data+sent_so_far, pktlen, netdump_mbuf_nop,
 				NULL, NULL, M_RDONLY, EXT_EXTREF);
 			m2->m_len = pktlen;
@@ -1419,26 +1456,30 @@ netdump_config_defaults()
 		//TODO: reflist and extlist
 		if (i<RESERVED){
 			struct mbuf * tmp = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
-			tmp->m_ext.ref_cnt = &reflisttx[i];
 			tmp->m_ext.ext_type = EXT_MOD_TYPE;
-			reflisttx[i] = 1;
+			*(tmp->m_ext.ref_cnt) = 0;
 			txlist[i] = tmp;
 			txlist_head = i;
+			reflisttx[txlist_head] = tmp->m_ext.ref_cnt;
+			extlisttx[txlist_head] = tmp->m_ext.ext_buf;
+			sizelisttx[txlist_head] = tmp->m_ext.ext_size;
 			
 			tmp = m_get(M_DONTWAIT, MT_DATA);
-			tmp->m_ext.ref_cnt = &reflisttx2[i];
+			tmp->m_ext.ref_cnt = &refilisttx2[i];
 			tmp->m_ext.ext_type = EXT_EXTREF;
-			reflisttx2[i] = 1;
+			*(tmp->m_ext.ref_cnt) = 0;
 			txlist2[i] = tmp;
 			txlist2_head = i;
+			reflisttx2[txlist2_head] = tmp->m_ext.ref_cnt;
 		}
 		if (i<RESERVEDRX/2){
 			struct mbuf * tmp = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
-			//tmp->m_ext.ref_cnt = &reflistrx[i];
-			//reflistrx[i] = 0;
-
+			*(tmp->m_ext.ref_cnt) = 0;
 			rxlist[i] = tmp;
 			rxlist_head = i;
+			reflistrx[rxlist_head] = tmp->m_ext.ref_cnt;
+			extlistrx[rxlist_head] = tmp->m_ext.ext_buf;
+			sizelistrx[rxlist_head] = tmp->m_ext.ext_size;
 		}
 	}
 
