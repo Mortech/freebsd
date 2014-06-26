@@ -2096,10 +2096,6 @@ uma_zalloc_arg(uma_zone_t zone, void *udata, int flags)
 	uma_bucket_t bucket;
 	int lockfail;
 	int cpu;
-#ifdef NETDUMP_CLIENT
-	if (panicstr != NULL)
-		panic("Call into uma while netdumping!");
-#endif
 	/* This is the fast path allocation */
 #ifdef UMA_DEBUG_ALLOC_1
 	printf("Allocating one item from %s(%p)\n", zone->uz_name, zone);
@@ -2638,11 +2634,6 @@ uma_zfree_arg(uma_zone_t zone, void *item, void *udata)
 	uma_bucket_t bucket;
 	int lockfail;
 	int cpu;
-
-#ifdef NETDUMP_CLIENT
-	if (panicstr != NULL)
-		panic("call into UMA while netdumping!");
-#endif
 
 #ifdef UMA_DEBUG_ALLOC_1
 	printf("Freeing item %p to %s(%p)\n", item, zone->uz_name, zone);
