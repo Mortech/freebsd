@@ -182,7 +182,7 @@ int refilisttx2[RESERVED];
  *	void
  */
  void
- netdump_free(struct mbuf * m){ //TODO
+ netdump_free(struct mbuf * m){ //TODO: maybe set pkthdr->csum_flags to 0?
  	struct mbuf * tmppkt = m;
  	//int head;
 	while (tmppkt != NULL){
@@ -190,9 +190,11 @@ int refilisttx2[RESERVED];
 		struct mbuf * tmp2 = tmppkt->m_nextpkt;
 		while (tmp != NULL){
 			struct mbuf * tmp3 = tmp->m_next;
+			if (*(tmp->m_ext.ref_cnt) != 1)
+				printf("\nREF COUNT NOT VALID\n");
 			switch(tmp->m_ext.ext_type){
 		 		case EXT_EXTREF: //m2
-		 			NETDDEBUG("m2\n");
+		 			//NETDDEBUG("m2\n");
 		 			//If room on end of array, append to it
 		 			if (txlist2_head + 1 < RESERVED && txlist2[txlist2_head+1] == NULL){
 		 				txlist2_head = txlist2_head+1;
@@ -200,10 +202,16 @@ int refilisttx2[RESERVED];
 						//No need to save external memory, just refcount TODO: check refcount
 						*(tmp->m_ext.ref_cnt) -= 1;
 						reflisttx2[txlist2_head] = tmp->m_ext.ref_cnt;
+						tmp->m_hdr.mh_flags=0; //TODO: refactor this out
+						tmp->m_hdr.mh_next=NULL;
+						tmp->m_hdr.mh_nextpkt=NULL;
+						tmp->m_hdr.mh_len=0;
+						tmp->m_hdr.mh_type=1;
+						tmp->m_hdr.mh_data=tmp->m_ext.ext_buf;
 					}
 					break;
 		 		case EXT_MOD_TYPE: //m
-		 			NETDDEBUG("m\n");
+		 			//NETDDEBUG("m\n");
 		 			if (txlist_head + 1 < RESERVED && txlist[txlist_head+1] == NULL){
 		 				txlist_head = txlist_head+1;
 						txlist[txlist_head] = tmp;
@@ -212,6 +220,12 @@ int refilisttx2[RESERVED];
 						reflisttx[txlist_head] = tmp->m_ext.ref_cnt;
 						extlisttx[txlist_head] = tmp->m_ext.ext_buf;
 						sizelisttx[txlist_head] = tmp->m_ext.ext_size;
+						tmp->m_hdr.mh_flags=3; //TODO: refactor this out
+						tmp->m_hdr.mh_next=NULL;
+						tmp->m_hdr.mh_nextpkt=NULL;
+						tmp->m_hdr.mh_len=0;
+						tmp->m_hdr.mh_type=1;
+						tmp->m_hdr.mh_data=tmp->m_ext.ext_buf;
 					}
 					break;
 		 		case EXT_PACKET:
@@ -224,12 +238,18 @@ int refilisttx2[RESERVED];
 						reflistrx[rxlist_head] = tmp->m_ext.ref_cnt;
 						extlistrx[rxlist_head] = tmp->m_ext.ext_buf;
 						sizelistrx[rxlist_head] = tmp->m_ext.ext_size;
+						tmp->m_hdr.mh_flags=3; //TODO: refactor this out
+						tmp->m_hdr.mh_next=NULL;
+						tmp->m_hdr.mh_nextpkt=NULL;
+						tmp->m_hdr.mh_len=0;
+						tmp->m_hdr.mh_type=1;
+						tmp->m_hdr.mh_data=tmp->m_ext.ext_buf;
 					}
-				case default:
-					//TODO: Imitate zfree better
+				default:
+					//TODO: Imitate zfree better??
 					break;
 			}
-			if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ //mb_free_ext
+			if ((tmp->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ //mb_free_ext
 				tmp->m_ext.ext_buf = NULL;// saved in extlist
 				tmp->m_ext.ext_free = NULL;
 				tmp->m_ext.ext_arg1 = NULL;
@@ -238,9 +258,9 @@ int refilisttx2[RESERVED];
 				tmp->m_ext.ext_type = 0;//This is given as an arg to netdump_alloc
 				tmp->m_ext.ref_cnt = NULL; //Saved in ref_cnt list
 				tmp->m_ext.ext_flags = 0;
-				tmp->m_flags &= ~M_EXT; //reset in alloc 
+				//tmp->m_flags &= ~M_EXT; //reset in alloc 
 			}
-			if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ //uma_zfree
+			if ((tmp->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ //uma_zfree
 				NETDDEBUG("Found tags for some reason\n");
 				tmp->m_pkthdr.tags.slh_first=NULL; //If we have tags for some reason, leak them
 			}
@@ -275,8 +295,7 @@ int refilisttx2[RESERVED];
 				*(m->m_ext.ref_cnt) += 1;
 				txlist2[txlist2_head] = NULL;
 				txlist2_head--;
-				m->m_ext.ext_type=type;
-				m->m_flags |= M_EXT;
+				m->m_hdr.mh_flags=0;
 			}
 			break;
  		case EXT_MOD_TYPE: //m
@@ -291,8 +310,7 @@ int refilisttx2[RESERVED];
 				*(m->m_ext.ref_cnt) += 1;
 				txlist[txlist_head] = NULL;
 				txlist_head--;
-				m->m_ext.ext_type=type;
-				m->m_flags |= M_EXT;
+				m->m_hdr.mh_flags=3;
 			}
 			break;
  		case EXT_PACKET: //rx
@@ -307,10 +325,22 @@ int refilisttx2[RESERVED];
 				*(m->m_ext.ref_cnt) += 1;
 				rxlist[rxlist_head] = NULL;
 				rxlist_head--;
-				m->m_ext.ext_type=type;
-				m->m_flags |= M_EXT;
+				m->m_hdr.mh_flags=3;
 			}
 	}
+	if (m!= NULL){
+		//reset header info
+		m->m_hdr.mh_next=NULL;
+		m->m_hdr.mh_nextpkt=NULL;
+		m->m_hdr.mh_len=0;
+		m->m_hdr.mh_type=1;
+		m->m_hdr.mh_data=m->m_ext.ext_buf;
+		//reset general external stuff
+		m->m_ext.ext_type=type;
+		//m->m_flags |= M_EXT;
+	}
+	if (*(m->m_ext.ref_cnt) != 1)
+		printf("\nREF COUNT NOT VALID\n");
 	return m;
  }
 
@@ -825,7 +855,7 @@ wait_for_ack:
 			//goto retransmit;
 		}
 
-		NETDDEBUG("nd_send: datalen = %d, sent=%d\n", datalen, sent_so_far);
+		//NETDDEBUG("nd_send: datalen = %d, sent=%d\n", datalen, sent_so_far);
 		sent_so_far += pktlen;
 	}
 	return 0;
