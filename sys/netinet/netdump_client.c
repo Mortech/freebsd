@@ -105,8 +105,8 @@ static int	 netdump_dumper(void *priv, void *virtual,
 		    vm_offset_t physical, off_t offset, size_t length);
 static int	 netdump_ether_output(struct mbuf *m, struct ifnet *ifp, 
 		    struct ether_addr dst, u_short etype);
-static int	 netdump_mbuf_nop(struct mbuf *ignored,
-		    void *ptr, void *opt_args);
+static int	 netdump_mbuf_nop(struct mbuf *ignored, void *ptr,
+		    void *opt_args);
 static int	 netdump_modevent(module_t mod, int type, void *unused); 
 static void	 netdump_network_poll(void);
 static void	 netdump_pkt_in(struct ifnet *ifp, struct mbuf *m);
@@ -166,8 +166,6 @@ struct mbuf *rxlist[NETDUMP_RESERVED * 2];
  */ 
 int reflist[NETDUMP_RESERVED];
 
-//TODO: code style (Yes, including this line)
-
 /*
  * [netdump_prealloc_mbufs]
  *
@@ -181,9 +179,10 @@ int reflist[NETDUMP_RESERVED];
  *	void
  */
 void
-netdump_prealloc_mbufs(){
+netdump_prealloc_mbufs()
+{
 	int i;
-	for(i = 0; i < NETDUMP_RESERVED; i++){
+	for(i = 0; i < NETDUMP_RESERVED; i++) {
 		struct mbuf *m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
 		m->m_ext.ext_type = EXT_MOD_TYPE;
 		*(m->m_ext.ref_cnt) = 0;
@@ -218,37 +217,42 @@ netdump_prealloc_mbufs(){
  *	void
  */
  void
- netdump_free(struct mbuf *m){
-	switch(m->m_ext.ext_type){
- 		case EXT_EXTREF: /* m2 */
+ netdump_free(struct mbuf *m)
+ {
+	switch(m->m_ext.ext_type) {
+ 		case EXT_EXTREF:
  			/*
  			 * If room on end of array, append to it
  			 */
  			if (txlist2_head + 1 < NETDUMP_RESERVED &&
- 			    txlist2[txlist2_head + 1] == NULL){
+ 			    txlist2[txlist2_head + 1] == NULL) {
  				txlist2_head = txlist2_head + 1;
 				txlist2[txlist2_head] = m;
 				*(m->m_ext.ref_cnt) -= 1;
 			}
 			break;
- 		case EXT_MOD_TYPE: //m
+ 		case EXT_MOD_TYPE:
  			if (txlist_head + 1 < NETDUMP_RESERVED &&
- 			    txlist[txlist_head + 1] == NULL){
+ 			    txlist[txlist_head + 1] == NULL) {
  				txlist_head = txlist_head + 1;
 				txlist[txlist_head] = m;
 				*(m->m_ext.ref_cnt) -= 1;
 			}
 			break;
- 		case EXT_PACKET: //rx
-		 	if (rxlist_head + 1 < NETDUMP_RESERVED*2 &&
-		 	    rxlist[rxlist_head + 1] == NULL){
+ 		case EXT_PACKET:
+		 	if (rxlist_head + 1 < NETDUMP_RESERVED * 2 &&
+		 	    rxlist[rxlist_head + 1] == NULL) {
  				rxlist_head = rxlist_head + 1;
 				rxlist[rxlist_head] = m;
 				*(m->m_ext.ref_cnt) -= 1;
 			}
+			break;
+		default:
+			printf("NETDUMP_FREE: Freed invalid type %u\n",
+			    m->m_ext.ext_type);
 	}
 
-	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ 
+	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)) { 
 		m->m_ext.ext_free = NULL;
 		m->m_ext.ext_arg1 = NULL;
 		m->m_ext.ext_arg2 = NULL;
@@ -260,8 +264,8 @@ netdump_prealloc_mbufs(){
 	 * If we have tags for some reason, leak them.
 	 * We don't care about them.
 	 */
-	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ 
-		m->m_pkthdr.tags.slh_first=NULL;
+	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)) { 
+		m->m_pkthdr.tags.slh_first = NULL;
 	}
 
  	return;
@@ -280,44 +284,45 @@ netdump_prealloc_mbufs(){
  *	struct mbuf * A pointer to the requested mbuf
  */
  struct mbuf *
- netdump_alloc(short type){
- 	struct mbuf * m = NULL;
- 	switch(type){
- 		case EXT_EXTREF: //m2
- 			if (txlist2_head > -1){
+ netdump_alloc(short type)
+ {
+ 	struct mbuf *m = NULL;
+ 	switch(type) {
+ 		case EXT_EXTREF:
+ 			if (txlist2_head > -1) {
 				m = txlist2[txlist2_head];
 				*(m->m_ext.ref_cnt) += 1;
 				txlist2[txlist2_head] = NULL;
 				txlist2_head--;
-				m->m_hdr.mh_flags=0;
+				m->m_hdr.mh_flags = 0;
 			}
 			break;
- 		case EXT_MOD_TYPE: //m
- 			if (txlist_head > -1){
+ 		case EXT_MOD_TYPE:
+ 			if (txlist_head > -1) {
 				m = txlist[txlist_head];
 				*(m->m_ext.ref_cnt) += 1;
 				txlist[txlist_head] = NULL;
 				txlist_head--;
-				m->m_hdr.mh_flags=3;
+				m->m_hdr.mh_flags = 3;
 			}
 			break;
- 		case EXT_PACKET: //rx
-		 	if (rxlist_head > -1){
+ 		case EXT_PACKET:
+		 	if (rxlist_head > -1) {
 				m = rxlist[rxlist_head];
 				*(m->m_ext.ref_cnt) += 1;
 				rxlist[rxlist_head] = NULL;
 				rxlist_head--;
-				m->m_hdr.mh_flags=3;
+				m->m_hdr.mh_flags = 3;
 			}
 	}
-	if (m!= NULL){
-		//reset header info
-		m->m_hdr.mh_next=NULL;
-		m->m_hdr.mh_nextpkt=NULL;
-		m->m_hdr.mh_len=0;
-		m->m_hdr.mh_type=1;
-		m->m_hdr.mh_data=m->m_ext.ext_buf;
-		m->m_ext.ext_type=type;
+	if (m != NULL) {
+		/* reset header info */
+		m->m_hdr.mh_next = NULL;
+		m->m_hdr.mh_nextpkt = NULL;
+		m->m_hdr.mh_len = 0;
+		m->m_hdr.mh_type = 1;
+		m->m_hdr.mh_data = m->m_ext.ext_buf;
+		m->m_ext.ext_type = type;
 	}
 	return m;
  }
@@ -366,7 +371,7 @@ sysctl_ip(SYSCTL_HANDLER_ARGS)
 	int len=req->newlen - req->newidx;
 
 	inet_ntoa_r(*(struct in_addr *)arg1, buf);
-	error = SYSCTL_OUT(req, buf, strlen(buf)+1);
+	error = SYSCTL_OUT(req, buf, strlen(buf) + 1);
 
 	if (error || !req->newptr)
 		return error;
@@ -375,7 +380,7 @@ sysctl_ip(SYSCTL_HANDLER_ARGS)
 		error = EINVAL;
 	} else {
 		error = SYSCTL_IN(req, buf, len);
-		buf[len]='\0';
+		buf[len] = '\0';
 		if (error)
 			return error;
 		if (!inet_aton(buf, &addr))
@@ -403,7 +408,7 @@ static int
 sysctl_nic(SYSCTL_HANDLER_ARGS)
 {
 	struct ifnet *ifn;
-	char buf[arg2+1];
+	char buf[arg2 + 1];
 	int error;
 	int len;
 
@@ -1297,7 +1302,7 @@ netdump_dumper(void *priv, void *virtual, vm_offset_t physical, off_t offset,
 	memcpy(buf, virtual, length);
 	err=netdump_send(msgtype, offset, buf, length);
 	if (err) {
-		dump_failed=1;
+		dump_failed = 1;
 		return err;
 	}
 	

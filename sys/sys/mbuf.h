@@ -633,7 +633,7 @@ static __inline struct mbuf *
 m_get(int how, short type)
 {
 #ifdef NETDUMP_CLIENT
-	if (panicstr != NULL ){
+	if (panicstr != NULL ) {
 		return netdump_alloc(EXT_EXTREF);
 	}
 #endif
@@ -654,7 +654,7 @@ m_getclr(int how, short type)
 	struct mb_args args;
 
 #ifdef NETDUMP_CLIENT
-	if (panicstr != NULL ){
+	if (panicstr != NULL ) {
 		m = netdump_alloc(EXT_PACKET);
 		if (m != NULL)
 			bzero(m->m_data, MLEN);
@@ -673,7 +673,7 @@ static __inline struct mbuf *
 m_gethdr(int how, short type)
 {
 #ifdef NETDUMP_CLIENT
-	if (panicstr != NULL ){
+	if (panicstr != NULL ) {
 		return netdump_alloc(EXT_MOD_TYPE);
 	}
 #endif
@@ -688,7 +688,7 @@ static __inline struct mbuf *
 m_getcl(int how, short type, int flags)
 {
 #ifdef NETDUMP_CLIENT
-	if (panicstr != NULL ){
+	if (panicstr != NULL ) {
 		return netdump_alloc(EXT_PACKET);
 	}
 #endif
@@ -1170,7 +1170,7 @@ m_free(struct mbuf *m)
 	struct mbuf *n = m->m_next;
 
 #ifdef NETDUMP_CLIENT
-	if (panicstr != NULL ){
+	if (panicstr != NULL ) {
 		netdump_free(m);
 		return (n);
 	}
