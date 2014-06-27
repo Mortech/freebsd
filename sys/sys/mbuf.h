@@ -34,6 +34,7 @@
 #ifndef _SYS_MBUF_H_
 #define	_SYS_MBUF_H_
 
+#include "opt_netdump.h"
 /* XXX: These includes suck. Sorry! */
 #include <sys/queue.h>
 #ifdef _KERNEL
@@ -43,6 +44,7 @@
 #include <sys/lock.h>
 #endif
 #endif
+
 
 
 /*
@@ -515,6 +517,11 @@ extern uma_zone_t	zone_ext_refcnt;
 
 void		 mb_free_ext(struct mbuf *);
 int		 m_pkthdr_init(struct mbuf *, int);
+#ifdef NETDUMP_CLIENT
+struct mbuf * netdump_alloc(short);
+void netdump_free(struct mbuf *);
+void netdump_prealloc_mbufs(void);
+#endif
 
 static __inline int
 m_gettype(int size)
@@ -625,6 +632,11 @@ m_init(struct mbuf *m, uma_zone_t zone, int size, int how, short type,
 static __inline struct mbuf *
 m_get(int how, short type)
 {
+#ifdef NETDUMP_CLIENT
+	if (panicstr != NULL ){
+		return netdump_alloc(EXT_EXTREF);
+	}
+#endif
 	struct mb_args args;
 
 	args.flags = 0;
@@ -641,6 +653,14 @@ m_getclr(int how, short type)
 	struct mbuf *m;
 	struct mb_args args;
 
+#ifdef NETDUMP_CLIENT
+	if (panicstr != NULL ){
+		m = netdump_alloc(EXT_PACKET);
+		if (m != NULL)
+			bzero(m->m_data, MLEN);
+		return (m);
+	}
+#endif
 	args.flags = 0;
 	args.type = type;
 	m = uma_zalloc_arg(zone_mbuf, &args, how);
@@ -652,6 +672,11 @@ m_getclr(int how, short type)
 static __inline struct mbuf *
 m_gethdr(int how, short type)
 {
+#ifdef NETDUMP_CLIENT
+	if (panicstr != NULL ){
+		return netdump_alloc(EXT_MOD_TYPE);
+	}
+#endif
 	struct mb_args args;
 
 	args.flags = M_PKTHDR;
@@ -662,6 +687,11 @@ m_gethdr(int how, short type)
 static __inline struct mbuf *
 m_getcl(int how, short type, int flags)
 {
+#ifdef NETDUMP_CLIENT
+	if (panicstr != NULL ){
+		return netdump_alloc(EXT_PACKET);
+	}
+#endif
 	struct mb_args args;
 
 	args.flags = flags;
@@ -697,7 +727,6 @@ static __inline void *
 m_cljget(struct mbuf *m, int how, int size)
 {
 	uma_zone_t zone;
-
 	if (m && m->m_flags & M_EXT)
 		printf("%s: %p mbuf already has cluster\n", __func__, m);
 	if (m != NULL)
@@ -1139,6 +1168,13 @@ m_free(struct mbuf *m)
 {
 
 	struct mbuf *n = m->m_next;
+
+#ifdef NETDUMP_CLIENT
+	if (panicstr != NULL ){
+		netdump_free(m);
+		return (n);
+	}
+#endif
 
 	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE))
 		m_tag_delete_chain(m, NULL);

@@ -145,30 +145,69 @@ static char nd_client_tun[INET_ADDRSTRLEN];
 static char nd_gw_tun[INET_ADDRSTRLEN];
 static char nd_nic_tun[IFNAMSIZ];
 
+
 int recvd_ack;
-int netdump_running;
-
-
-//TODO: Use lists, not arrays. Reuse rxbufs?
 
 int txlist_head = -1;
 int rxlist_head = -1;
 int txlist2_head = -1;
-#define RESERVED 4
-#define RESERVEDRX 16
 
-struct mbuf * txlist[RESERVED]; // m
-struct mbuf * txlist2[RESERVED]; // m2
-struct mbuf * rxlist[RESERVEDRX]; // pkt_in (6) EXT_PACKET
-void * extlisttx[RESERVED];
-void * extlistrx[RESERVEDRX];
-volatile u_int * reflisttx[RESERVED];
-volatile u_int * reflisttx2[RESERVED];
-volatile u_int * reflistrx[RESERVEDRX];
-int sizelisttx[RESERVED];
-int sizelistrx[RESERVEDRX];
+struct mbuf * txlist[NETDUMP_RESERVED]; // m
+struct mbuf * txlist2[NETDUMP_RESERVED]; // m2
+struct mbuf * rxlist[NETDUMP_RESERVED*2]; // pkt_in (6) EXT_PACKET
+void * extlisttx[NETDUMP_RESERVED]; //TODO: Do I even need these lists? I don't really use them
+void * extlistrx[NETDUMP_RESERVED*2];
+volatile u_int * reflisttx[NETDUMP_RESERVED];
+volatile u_int * reflisttx2[NETDUMP_RESERVED];
+volatile u_int * reflistrx[NETDUMP_RESERVED*2];
+int sizelisttx[NETDUMP_RESERVED];
+int sizelistrx[NETDUMP_RESERVED*2];
 
-int refilisttx2[RESERVED];
+int refilisttx2[NETDUMP_RESERVED];
+
+/*
+ * [netdump_prealloc_mbufs]
+ *
+ * Called upon module load. Initializes a set number of mbufs and sets
+ * them aside for use later during netdumping.
+ *
+ * Parameters:
+ *	void
+ *
+ * Returns:
+ *	void
+ */
+void
+netdump_prealloc_mbufs(){
+	int i;
+	for(i=0; i<NETDUMP_RESERVED; i++){
+		struct mbuf * m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
+		m->m_ext.ext_type = EXT_MOD_TYPE;
+		*(m->m_ext.ref_cnt) = 0;
+		txlist[i] = m;
+		txlist_head = i;
+		reflisttx[txlist_head] = m->m_ext.ref_cnt;
+		extlisttx[txlist_head] = m->m_ext.ext_buf;
+		sizelisttx[txlist_head] = m->m_ext.ext_size;
+		
+		m = m_get(M_DONTWAIT, MT_DATA);
+		m->m_ext.ref_cnt = &refilisttx2[i];
+		m->m_ext.ext_type = EXT_EXTREF;
+		*(m->m_ext.ref_cnt) = 0;
+		txlist2[i] = m;
+		txlist2_head = i;
+		reflisttx2[txlist2_head] = m->m_ext.ref_cnt;
+
+		m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
+		*(m->m_ext.ref_cnt) = 0;
+		rxlist[i] = m;
+		rxlist_head = i;
+		reflistrx[rxlist_head] = m->m_ext.ref_cnt;
+		extlistrx[rxlist_head] = m->m_ext.ext_buf;
+		sizelistrx[rxlist_head] = m->m_ext.ext_size;
+	}
+}
+
 
 /*
  * [netdump_free]
@@ -182,91 +221,71 @@ int refilisttx2[RESERVED];
  *	void
  */
  void
- netdump_free(struct mbuf * m){ //TODO: maybe set pkthdr->csum_flags to 0?
- 	struct mbuf * tmppkt = m;
- 	//int head;
-	while (tmppkt != NULL){
-		struct mbuf * tmp = tmppkt;
-		struct mbuf * tmp2 = tmppkt->m_nextpkt;
-		while (tmp != NULL){
-			struct mbuf * tmp3 = tmp->m_next;
-			if (*(tmp->m_ext.ref_cnt) != 1)
-				printf("\nREF COUNT NOT VALID\n");
-			switch(tmp->m_ext.ext_type){
-		 		case EXT_EXTREF: //m2
-		 			//NETDDEBUG("m2\n");
-		 			//If room on end of array, append to it
-		 			if (txlist2_head + 1 < RESERVED && txlist2[txlist2_head+1] == NULL){
-		 				txlist2_head = txlist2_head+1;
-						txlist2[txlist2_head] = tmp;
-						//No need to save external memory, just refcount TODO: check refcount
-						*(tmp->m_ext.ref_cnt) -= 1;
-						reflisttx2[txlist2_head] = tmp->m_ext.ref_cnt;
-						tmp->m_hdr.mh_flags=0; //TODO: refactor this out
-						tmp->m_hdr.mh_next=NULL;
-						tmp->m_hdr.mh_nextpkt=NULL;
-						tmp->m_hdr.mh_len=0;
-						tmp->m_hdr.mh_type=1;
-						tmp->m_hdr.mh_data=tmp->m_ext.ext_buf;
-					}
-					break;
-		 		case EXT_MOD_TYPE: //m
-		 			//NETDDEBUG("m\n");
-		 			if (txlist_head + 1 < RESERVED && txlist[txlist_head+1] == NULL){
-		 				txlist_head = txlist_head+1;
-						txlist[txlist_head] = tmp;
-						//put external memory and refcount into correct lists
-						*(tmp->m_ext.ref_cnt) -= 1;
-						reflisttx[txlist_head] = tmp->m_ext.ref_cnt;
-						extlisttx[txlist_head] = tmp->m_ext.ext_buf;
-						sizelisttx[txlist_head] = tmp->m_ext.ext_size;
-						tmp->m_hdr.mh_flags=3; //TODO: refactor this out
-						tmp->m_hdr.mh_next=NULL;
-						tmp->m_hdr.mh_nextpkt=NULL;
-						tmp->m_hdr.mh_len=0;
-						tmp->m_hdr.mh_type=1;
-						tmp->m_hdr.mh_data=tmp->m_ext.ext_buf;
-					}
-					break;
-		 		case EXT_PACKET:
-		 			//NETDDEBUG("rx\n");
-				 	if (rxlist_head + 1 < RESERVEDRX && rxlist[rxlist_head+1] == NULL){
-		 				rxlist_head = rxlist_head+1;
-						rxlist[rxlist_head] = tmp;
-						//Same as m
-						*(tmp->m_ext.ref_cnt) -= 1;
-						reflistrx[rxlist_head] = tmp->m_ext.ref_cnt;
-						extlistrx[rxlist_head] = tmp->m_ext.ext_buf;
-						sizelistrx[rxlist_head] = tmp->m_ext.ext_size;
-						tmp->m_hdr.mh_flags=3; //TODO: refactor this out
-						tmp->m_hdr.mh_next=NULL;
-						tmp->m_hdr.mh_nextpkt=NULL;
-						tmp->m_hdr.mh_len=0;
-						tmp->m_hdr.mh_type=1;
-						tmp->m_hdr.mh_data=tmp->m_ext.ext_buf;
-					}
-				default:
-					//TODO: Imitate zfree better??
-					break;
+ netdump_free(struct mbuf * m){ //TODO: Deal with ref_cnt being off?
+	switch(m->m_ext.ext_type){
+ 		case EXT_EXTREF: //m2
+ 			//If room on end of array, append to it
+ 			if (txlist2_head + 1 < NETDUMP_RESERVED && txlist2[txlist2_head+1] == NULL){
+ 				txlist2_head = txlist2_head+1;
+				txlist2[txlist2_head] = m;
+				//No need to save external memory, just refcount TODO: check refcount
+				*(m->m_ext.ref_cnt) -= 1;
+				reflisttx2[txlist2_head] = m->m_ext.ref_cnt;
+				m->m_hdr.mh_flags=0; //TODO: refactor this out
+				m->m_hdr.mh_next=NULL;
+				m->m_hdr.mh_nextpkt=NULL;
+				m->m_hdr.mh_len=0;
+				m->m_hdr.mh_type=1;
+				m->m_hdr.mh_data=m->m_ext.ext_buf;
 			}
-			if ((tmp->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ //mb_free_ext
-				tmp->m_ext.ext_buf = NULL;// saved in extlist
-				tmp->m_ext.ext_free = NULL;
-				tmp->m_ext.ext_arg1 = NULL;
-				tmp->m_ext.ext_arg2 = NULL;
-				tmp->m_ext.ext_size = 0;// saved in sizelist
-				tmp->m_ext.ext_type = 0;//This is given as an arg to netdump_alloc
-				tmp->m_ext.ref_cnt = NULL; //Saved in ref_cnt list
-				tmp->m_ext.ext_flags = 0;
-				//tmp->m_flags &= ~M_EXT; //reset in alloc 
+			break;
+ 		case EXT_MOD_TYPE: //m
+ 			if (txlist_head + 1 < NETDUMP_RESERVED && txlist[txlist_head+1] == NULL){
+ 				txlist_head = txlist_head+1;
+				txlist[txlist_head] = m;
+				//put external memory and refcount into correct lists
+				*(m->m_ext.ref_cnt) -= 1;
+				reflisttx[txlist_head] = m->m_ext.ref_cnt;
+				extlisttx[txlist_head] = m->m_ext.ext_buf;
+				sizelisttx[txlist_head] = m->m_ext.ext_size;
+				m->m_hdr.mh_flags=3; //TODO: refactor this out
+				m->m_hdr.mh_next=NULL;
+				m->m_hdr.mh_nextpkt=NULL;
+				m->m_hdr.mh_len=0;
+				m->m_hdr.mh_type=1;
+				m->m_hdr.mh_data=m->m_ext.ext_buf;
 			}
-			if ((tmp->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ //uma_zfree
-				NETDDEBUG("Found tags for some reason\n");
-				tmp->m_pkthdr.tags.slh_first=NULL; //If we have tags for some reason, leak them
+			break;
+ 		case EXT_PACKET:
+		 	if (rxlist_head + 1 < NETDUMP_RESERVED*2 && rxlist[rxlist_head+1] == NULL){
+ 				rxlist_head = rxlist_head+1;
+				rxlist[rxlist_head] = m;
+				//Same as m
+				*(m->m_ext.ref_cnt) -= 1;
+				reflistrx[rxlist_head] = m->m_ext.ref_cnt;
+				extlistrx[rxlist_head] = m->m_ext.ext_buf;
+				sizelistrx[rxlist_head] = m->m_ext.ext_size;
+				m->m_hdr.mh_flags=3; //TODO: refactor this out
+				m->m_hdr.mh_next=NULL;
+				m->m_hdr.mh_nextpkt=NULL;
+				m->m_hdr.mh_len=0;
+				m->m_hdr.mh_type=1;
+				m->m_hdr.mh_data=m->m_ext.ext_buf;
 			}
-			tmp = tmp3;
-		}
-		tmppkt = tmp2;
+	}
+	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ //mb_free_ext
+		m->m_ext.ext_buf = NULL;// saved in extlist
+		m->m_ext.ext_free = NULL;
+		m->m_ext.ext_arg1 = NULL;
+		m->m_ext.ext_arg2 = NULL;
+		m->m_ext.ext_size = 0;// saved in sizelist
+		m->m_ext.ext_type = 0;//This is given as an arg to netdump_alloc
+		m->m_ext.ref_cnt = NULL; //Saved in ref_cnt list
+		m->m_ext.ext_flags = 0;
+		//m->m_flags &= ~M_EXT; //reset in alloc 
+	}
+	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ 
+		m->m_pkthdr.tags.slh_first=NULL; //If we have tags for some reason, leak them
 	}
  	return;
  }
@@ -284,7 +303,7 @@ int refilisttx2[RESERVED];
  *	struct mbuf * A pointer to the requested mbuf
  */
  struct mbuf *
- netdump_alloc(short type){ //TODO: Probably want to reset mh_data to point at correct place
+ netdump_alloc(short type){
  	struct mbuf * m = NULL;
  	switch(type){
  		case EXT_EXTREF: //m2
@@ -339,10 +358,9 @@ int refilisttx2[RESERVED];
 		m->m_ext.ext_type=type;
 		//m->m_flags |= M_EXT;
 	}
-	if (*(m->m_ext.ref_cnt) != 1)
-		printf("\nREF COUNT NOT VALID\n");
 	return m;
  }
+
 
 /*
  * [netdump_supported_nic]
@@ -691,7 +709,7 @@ netdump_send_arp()
 
 	/* Fill-up a broadcast address. */
 	memset(&bcast, 0xFF, ETHER_ADDR_LEN);
-	m = netdump_alloc(EXT_MOD_TYPE);
+	m = m_gethdr(M_NOWAIT, MT_DATA);
 	if (m == NULL) {
 		printf("netdump_send_arp: Out of mbufs\n");
 		return ENOBUFS;
@@ -798,7 +816,7 @@ retransmit:
 		 * get and fill a header mbuf, then chain data as an extended
 		 * mbuf.
 		 */
-		m = netdump_alloc(EXT_MOD_TYPE);
+		m = m_gethdr(M_NOWAIT, MT_DATA);
 		if (m == NULL) {
 			printf("netdump_send: Out of mbufs!\n");
 			goto wait_for_ack;
@@ -814,8 +832,8 @@ retransmit:
 		nd_msg_hdr->mh__pad = 0;
 
 		if (pktlen) {
-			if ((m2=netdump_alloc(EXT_EXTREF)) == NULL) {
-				netdump_free(m);
+			if ((m2=m_get(M_DONTWAIT, MT_DATA)) == NULL) {
+				m_freem(m);
 				printf("netdump_send: Out of mbufs! 2\n");
 				goto wait_for_ack;
 			}
@@ -1241,7 +1259,7 @@ netdump_pkt_in(struct ifnet *ifp, struct mbuf *m)
 
 done:
 	if (m) {
-		netdump_free(m);
+		m_freem(m);
 	}
 }
 
@@ -1374,81 +1392,77 @@ netdump_trigger(void *arg, int howto)
 	 * can find the stack trace.
 	 */
 	printf("\nCall into trigger!\n");
-	if (!netdump_running){
-		savectx(&dumppcb);
-		dumptid = curthread->td_tid;
-		dumping++;
-		netdump_running++;
+	savectx(&dumppcb);
+	dumptid = curthread->td_tid;
+	dumping++;
 
-		/*
-		 * nd_server_port could have switched after the first ack the
-		 * first time it gets called.  Adjust it accordingly.
-		 */
-		nd_server_port = NETDUMP_PORT;
-		if ((nd_nic->if_capenable & IFCAP_POLLING) == 0) {
+	/*
+	 * nd_server_port could have switched after the first ack the
+	 * first time it gets called.  Adjust it accordingly.
+	 */
+	nd_server_port = NETDUMP_PORT;
+	if ((nd_nic->if_capenable & IFCAP_POLLING) == 0) {
 #if defined(KDB) && !defined(KDB_UNATTENDED)
-			if (panicstr == NULL)
+		if (panicstr == NULL)
 #endif
-				nd_nic->if_ndumpfuncs->ne_disable_intr(nd_nic);
-		}
+			nd_nic->if_ndumpfuncs->ne_disable_intr(nd_nic);
+	}
 
-		/* Make the card use *our* receive callback */
-		old_if_input = nd_nic->if_input;
-		nd_nic->if_input = netdump_pkt_in;
+	/* Make the card use *our* receive callback */
+	old_if_input = nd_nic->if_input;
+	nd_nic->if_input = netdump_pkt_in;
 
-		if (nd_gw.s_addr == INADDR_ANY) {
-			nd_gw.s_addr = nd_server.s_addr;
-		}
-		printf("\n-----------------------------------\n");
-		printf("netdump in progress. searching for server.. ");
-		if (netdump_arp_server()) {
-			printf("Failed to locate server MAC address\n");
-			goto trig_abort;
-		}
-		if (netdump_send(NETDUMP_HERALD, 0, NULL, 0) != 0) {
-			printf("Failed to contact netdump server\n");
-			goto trig_abort;
-		}
-		printf("dumping to %s (%6D)\n", inet_ntoa(nd_server),
-				nd_gw_mac.octet, ":");
-		printf("-----------------------------------\n");
+	if (nd_gw.s_addr == INADDR_ANY) {
+		nd_gw.s_addr = nd_server.s_addr;
+	}
+	printf("\n-----------------------------------\n");
+	printf("netdump in progress. searching for server.. ");
+	if (netdump_arp_server()) {
+		printf("Failed to locate server MAC address\n");
+		goto trig_abort;
+	}
+	if (netdump_send(NETDUMP_HERALD, 0, NULL, 0) != 0) {
+		printf("Failed to contact netdump server\n");
+		goto trig_abort;
+	}
+	printf("dumping to %s (%6D)\n", inet_ntoa(nd_server),
+			nd_gw_mac.octet, ":");
+	printf("-----------------------------------\n");
 
-		/*
-		 * dump memory.
-		 */
-		dumper.dumper = netdump_dumper;
-		dumper.priv = NULL;
-		dumper.blocksize = NETDUMP_DATASIZE;
-		dumper.mediasize = 0;
-		dumper.mediaoffset = 0;
+	/*
+	 * dump memory.
+	 */
+	dumper.dumper = netdump_dumper;
+	dumper.priv = NULL;
+	dumper.blocksize = NETDUMP_DATASIZE;
+	dumper.mediasize = 0;
+	dumper.mediaoffset = 0;
 
-		/* in dump_machdep.c */
-		dumpsys(&dumper);
+	/* in dump_machdep.c */
+	dumpsys(&dumper);
 
-		if (dump_failed) {
-			printf("Failed to dump the actual raw datas\n");
-			goto trig_abort;
-		}
+	if (dump_failed) {
+		printf("Failed to dump the actual raw datas\n");
+		goto trig_abort;
+	}
 
-		if (netdump_send(NETDUMP_FINISHED, 0, NULL, 0) != 0) {
-			printf("Failed to close the transaction\n");
-			goto trig_abort;
-		}
-		printf("\nnetdump finished.\n");
-		printf("cancelling normal dump\n");
-		set_dumper(NULL, NULL);
+	if (netdump_send(NETDUMP_FINISHED, 0, NULL, 0) != 0) {
+		printf("Failed to close the transaction\n");
+		goto trig_abort;
+	}
+	printf("\nnetdump finished.\n");
+	printf("cancelling normal dump\n");
+	set_dumper(NULL, NULL);
 trig_abort:
-		if (old_if_input)
-			nd_nic->if_input = old_if_input;
-		if ((nd_nic->if_capenable & IFCAP_POLLING) == 0) {
+	if (old_if_input)
+		nd_nic->if_input = old_if_input;
+	if ((nd_nic->if_capenable & IFCAP_POLLING) == 0) {
 #if defined(KDB) && !defined(KDB_UNATTENDED)
-			if (panicstr == NULL)
+		if (panicstr == NULL)
 #endif
-				nd_nic->if_ndumpfuncs->ne_enable_intr(nd_nic);
-		}
+			nd_nic->if_ndumpfuncs->ne_enable_intr(nd_nic);
 	}
 	dumping--;
-	netdump_running--;
 }
 
 /*-
@@ -1475,44 +1489,7 @@ netdump_config_defaults()
 	int found;
 	recvd_ack=0;
 
-	/* TODO: Prealloc some mbuf clusters for use with netdump
-	*
-	* 	Instead of freeing mbufs, add them onto netdump's free list when netdumping.
-	*	pull from this list when sending. If out of mbufs, poll and wait.
-	*/
-
-	int i;
-	for(i=0; i<RESERVED || i <RESERVEDRX/2; i++){
-		//TODO: reflist and extlist
-		if (i<RESERVED){
-			struct mbuf * tmp = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
-			tmp->m_ext.ext_type = EXT_MOD_TYPE;
-			*(tmp->m_ext.ref_cnt) = 0;
-			txlist[i] = tmp;
-			txlist_head = i;
-			reflisttx[txlist_head] = tmp->m_ext.ref_cnt;
-			extlisttx[txlist_head] = tmp->m_ext.ext_buf;
-			sizelisttx[txlist_head] = tmp->m_ext.ext_size;
-			
-			tmp = m_get(M_DONTWAIT, MT_DATA);
-			tmp->m_ext.ref_cnt = &refilisttx2[i];
-			tmp->m_ext.ext_type = EXT_EXTREF;
-			*(tmp->m_ext.ref_cnt) = 0;
-			txlist2[i] = tmp;
-			txlist2_head = i;
-			reflisttx2[txlist2_head] = tmp->m_ext.ref_cnt;
-		}
-		if (i<RESERVEDRX/2){
-			struct mbuf * tmp = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
-			*(tmp->m_ext.ref_cnt) = 0;
-			rxlist[i] = tmp;
-			rxlist_head = i;
-			reflistrx[rxlist_head] = tmp->m_ext.ref_cnt;
-			extlistrx[rxlist_head] = tmp->m_ext.ext_buf;
-			sizelistrx[rxlist_head] = tmp->m_ext.ext_size;
-		}
-	}
-
+	//TODO: Remove my constants from this!
 	found = 0;
 	IFNET_RLOCK_NOSLEEP();
 	TAILQ_FOREACH(ifn, &V_ifnet, if_link) {
@@ -1549,12 +1526,14 @@ netdump_config_defaults()
 	}
 }
 
+
 static int
 netdump_modevent(module_t mod, int type, void *unused) 
 {
 	switch (type) {
 	case MOD_LOAD:
 		netdump_config_defaults();
+		netdump_prealloc_mbufs();
 
 		/* PRI_FIRST happens before the networks are disabled */
 		nd_tag = EVENTHANDLER_REGISTER(shutdown_pre_sync, 

@@ -3111,19 +3111,8 @@ lem_txeof(struct adapter *adapter)
 				    BUS_DMASYNC_POSTWRITE);
 				bus_dmamap_unload(adapter->txtag,
 				    tx_buffer->map);
-#ifdef NETDUMP_CLIENT
-				/*  TODO Check for tx vs tx2 */
-				if ( netdump_running ) {
-					netdump_free(tx_buffer->m_head);
-					tx_buffer->m_head = NULL;
-				} else {
-
-#endif
-                        	m_freem(tx_buffer->m_head);
-                        	tx_buffer->m_head = NULL;
-#ifdef NETDUMP_CLIENT
-                }
-#endif
+            	m_freem(tx_buffer->m_head);
+            	tx_buffer->m_head = NULL;
                 	}
 			tx_buffer->next_eop = -1;
 			adapter->watchdog_time = ticks;
@@ -3197,16 +3186,8 @@ lem_get_buf(struct adapter *adapter, int i)
 	bus_dmamap_t		map;
 	struct em_buffer	*rx_buffer;
 	int			error, nsegs;
-#ifdef NETDUMP_CLIENT
-			/*  Use prealloced cluster */
-			if ( netdump_running ) {
-				m = netdump_alloc(EXT_PACKET);
-			} else {
-#endif
-			m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
-#ifdef NETDUMP_CLIENT
-			}
-#endif
+
+	m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
 	if (m == NULL) {
 		adapter->mbuf_cluster_failed++;
 		return (ENOBUFS);
@@ -3686,16 +3667,7 @@ discard:
 			    (MCLBYTES - ETHER_ALIGN))
 				m_adj(mp, ETHER_ALIGN);
 			if (adapter->fmp != NULL) {
-#ifdef NETDUMP_CLIENT
-				/*  Use prealloced cluster */
-				if ( netdump_running ) {
-					netdump_free(adapter->fmp);
-				} else {
-#endif
 				m_freem(adapter->fmp);
-#ifdef NETDUMP_CLIENT
-				}
-#endif
 				adapter->fmp = NULL;
 				adapter->lmp = NULL;
 			}

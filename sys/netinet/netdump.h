@@ -41,6 +41,8 @@
 #define	NETDUMP_KDH		4	/* Contains kernel dump header. */
 
 #define	NETDUMP_DATASIZE	8192	/* Packets payload. */
+#define NETDUMP_RESERVED	4
+
 
 struct netdump_msg_hdr {
 	uint32_t	mh_type; /* NETDUMP_HERALD, _FINISHED, _VMCORE, _KDH. */
@@ -59,14 +61,9 @@ struct netdump_msg {
 	uint8_t		nm_data[NETDUMP_DATASIZE];
 };
 
-extern int netdump_running;
-
 #ifdef _KERNEL
 
 typedef void ndumplock_handler_t(struct ifnet *);
-
-void netdump_free(struct mbuf *);
-struct mbuf * netdump_alloc(short type);
 
 struct netdump_methods {
 	poll_handler_t		*ne_poll_locked;
