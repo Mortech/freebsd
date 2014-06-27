@@ -155,15 +155,8 @@ int txlist2_head = -1;
 struct mbuf * txlist[NETDUMP_RESERVED]; // m
 struct mbuf * txlist2[NETDUMP_RESERVED]; // m2
 struct mbuf * rxlist[NETDUMP_RESERVED*2]; // pkt_in (6) EXT_PACKET
-void * extlisttx[NETDUMP_RESERVED]; //TODO: Do I even need these lists? I don't really use them
-void * extlistrx[NETDUMP_RESERVED*2];
-volatile u_int * reflisttx[NETDUMP_RESERVED];
-volatile u_int * reflisttx2[NETDUMP_RESERVED];
-volatile u_int * reflistrx[NETDUMP_RESERVED*2];
-int sizelisttx[NETDUMP_RESERVED];
-int sizelistrx[NETDUMP_RESERVED*2];
 
-int refilisttx2[NETDUMP_RESERVED];
+int reflist[NETDUMP_RESERVED];
 
 /*
  * [netdump_prealloc_mbufs]
@@ -186,25 +179,18 @@ netdump_prealloc_mbufs(){
 		*(m->m_ext.ref_cnt) = 0;
 		txlist[i] = m;
 		txlist_head = i;
-		reflisttx[txlist_head] = m->m_ext.ref_cnt;
-		extlisttx[txlist_head] = m->m_ext.ext_buf;
-		sizelisttx[txlist_head] = m->m_ext.ext_size;
 		
-		m = m_get(M_DONTWAIT, MT_DATA);
-		m->m_ext.ref_cnt = &refilisttx2[i];
+		m = m_get(M_DONTWAIT, MT_DATA); //TODO: Don't allocate memory for this if we're just going to leak it.
+		m->m_ext.ref_cnt = &reflist[i];
 		m->m_ext.ext_type = EXT_EXTREF;
 		*(m->m_ext.ref_cnt) = 0;
 		txlist2[i] = m;
 		txlist2_head = i;
-		reflisttx2[txlist2_head] = m->m_ext.ref_cnt;
 
 		m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
 		*(m->m_ext.ref_cnt) = 0;
 		rxlist[i] = m;
 		rxlist_head = i;
-		reflistrx[rxlist_head] = m->m_ext.ref_cnt;
-		extlistrx[rxlist_head] = m->m_ext.ext_buf;
-		sizelistrx[rxlist_head] = m->m_ext.ext_size;
 	}
 }
 
@@ -228,61 +214,29 @@ netdump_prealloc_mbufs(){
  			if (txlist2_head + 1 < NETDUMP_RESERVED && txlist2[txlist2_head+1] == NULL){
  				txlist2_head = txlist2_head+1;
 				txlist2[txlist2_head] = m;
-				//No need to save external memory, just refcount TODO: check refcount
 				*(m->m_ext.ref_cnt) -= 1;
-				reflisttx2[txlist2_head] = m->m_ext.ref_cnt;
-				m->m_hdr.mh_flags=0; //TODO: refactor this out
-				m->m_hdr.mh_next=NULL;
-				m->m_hdr.mh_nextpkt=NULL;
-				m->m_hdr.mh_len=0;
-				m->m_hdr.mh_type=1;
-				m->m_hdr.mh_data=m->m_ext.ext_buf;
 			}
 			break;
  		case EXT_MOD_TYPE: //m
  			if (txlist_head + 1 < NETDUMP_RESERVED && txlist[txlist_head+1] == NULL){
  				txlist_head = txlist_head+1;
 				txlist[txlist_head] = m;
-				//put external memory and refcount into correct lists
 				*(m->m_ext.ref_cnt) -= 1;
-				reflisttx[txlist_head] = m->m_ext.ref_cnt;
-				extlisttx[txlist_head] = m->m_ext.ext_buf;
-				sizelisttx[txlist_head] = m->m_ext.ext_size;
-				m->m_hdr.mh_flags=3; //TODO: refactor this out
-				m->m_hdr.mh_next=NULL;
-				m->m_hdr.mh_nextpkt=NULL;
-				m->m_hdr.mh_len=0;
-				m->m_hdr.mh_type=1;
-				m->m_hdr.mh_data=m->m_ext.ext_buf;
 			}
 			break;
- 		case EXT_PACKET:
+ 		case EXT_PACKET: //rx
 		 	if (rxlist_head + 1 < NETDUMP_RESERVED*2 && rxlist[rxlist_head+1] == NULL){
  				rxlist_head = rxlist_head+1;
 				rxlist[rxlist_head] = m;
-				//Same as m
 				*(m->m_ext.ref_cnt) -= 1;
-				reflistrx[rxlist_head] = m->m_ext.ref_cnt;
-				extlistrx[rxlist_head] = m->m_ext.ext_buf;
-				sizelistrx[rxlist_head] = m->m_ext.ext_size;
-				m->m_hdr.mh_flags=3; //TODO: refactor this out
-				m->m_hdr.mh_next=NULL;
-				m->m_hdr.mh_nextpkt=NULL;
-				m->m_hdr.mh_len=0;
-				m->m_hdr.mh_type=1;
-				m->m_hdr.mh_data=m->m_ext.ext_buf;
 			}
 	}
 	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ //mb_free_ext
-		m->m_ext.ext_buf = NULL;// saved in extlist
 		m->m_ext.ext_free = NULL;
 		m->m_ext.ext_arg1 = NULL;
 		m->m_ext.ext_arg2 = NULL;
-		m->m_ext.ext_size = 0;// saved in sizelist
 		m->m_ext.ext_type = 0;//This is given as an arg to netdump_alloc
-		m->m_ext.ref_cnt = NULL; //Saved in ref_cnt list
 		m->m_ext.ext_flags = 0;
-		//m->m_flags &= ~M_EXT; //reset in alloc 
 	}
 	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ 
 		m->m_pkthdr.tags.slh_first=NULL; //If we have tags for some reason, leak them
@@ -309,8 +263,6 @@ netdump_prealloc_mbufs(){
  		case EXT_EXTREF: //m2
  			if (txlist2_head > -1){
 				m = txlist2[txlist2_head];
-				m->m_ext.ref_cnt = reflisttx2[txlist2_head];
-				reflisttx2[txlist2_head] = NULL;
 				*(m->m_ext.ref_cnt) += 1;
 				txlist2[txlist2_head] = NULL;
 				txlist2_head--;
@@ -320,12 +272,6 @@ netdump_prealloc_mbufs(){
  		case EXT_MOD_TYPE: //m
  			if (txlist_head > -1){
 				m = txlist[txlist_head];
-				m->m_ext.ref_cnt = reflisttx[txlist_head];
-				reflisttx[txlist_head] = NULL;
-				m->m_ext.ext_buf = extlisttx[txlist_head];
-				extlisttx[txlist_head] = NULL;
-				m->m_ext.ext_size = sizelisttx[txlist_head];
-				sizelisttx[txlist_head] = 0;
 				*(m->m_ext.ref_cnt) += 1;
 				txlist[txlist_head] = NULL;
 				txlist_head--;
@@ -335,12 +281,6 @@ netdump_prealloc_mbufs(){
  		case EXT_PACKET: //rx
 		 	if (rxlist_head > -1){
 				m = rxlist[rxlist_head];
-				m->m_ext.ref_cnt = reflistrx[rxlist_head];
-				reflistrx[rxlist_head] = NULL;
-				m->m_ext.ext_buf = extlistrx[rxlist_head];
-				extlistrx[rxlist_head] = NULL;
-				m->m_ext.ext_size = sizelistrx[rxlist_head];
-				sizelistrx[rxlist_head] = 0;
 				*(m->m_ext.ref_cnt) += 1;
 				rxlist[rxlist_head] = NULL;
 				rxlist_head--;
@@ -354,9 +294,7 @@ netdump_prealloc_mbufs(){
 		m->m_hdr.mh_len=0;
 		m->m_hdr.mh_type=1;
 		m->m_hdr.mh_data=m->m_ext.ext_buf;
-		//reset general external stuff
 		m->m_ext.ext_type=type;
-		//m->m_flags |= M_EXT;
 	}
 	return m;
  }
