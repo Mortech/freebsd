@@ -105,7 +105,8 @@ static int	 netdump_dumper(void *priv, void *virtual,
 		    vm_offset_t physical, off_t offset, size_t length);
 static int	 netdump_ether_output(struct mbuf *m, struct ifnet *ifp, 
 		    struct ether_addr dst, u_short etype);
-static int	 netdump_mbuf_nop(struct mbuf *ignored, void *ptr, void *opt_args);
+static int	 netdump_mbuf_nop(struct mbuf *ignored,
+		    void *ptr, void *opt_args);
 static int	 netdump_modevent(module_t mod, int type, void *unused); 
 static void	 netdump_network_poll(void);
 static void	 netdump_pkt_in(struct ifnet *ifp, struct mbuf *m);
@@ -148,15 +149,24 @@ static char nd_nic_tun[IFNAMSIZ];
 
 int recvd_ack;
 
+/* Indexes into my 'lists' */
 int txlist_head = -1;
 int rxlist_head = -1;
 int txlist2_head = -1;
 
-struct mbuf * txlist[NETDUMP_RESERVED]; // m
-struct mbuf * txlist2[NETDUMP_RESERVED]; // m2
-struct mbuf * rxlist[NETDUMP_RESERVED*2]; // pkt_in (6) EXT_PACKET
+/* 
+ * Separate lists for m, m2, and pkt_in
+ */
+struct mbuf *txlist[NETDUMP_RESERVED];
+struct mbuf *txlist2[NETDUMP_RESERVED];
+struct mbuf *rxlist[NETDUMP_RESERVED * 2];
 
+/*
+ * references for m2
+ */ 
 int reflist[NETDUMP_RESERVED];
+
+//TODO: code style (Yes, including this line)
 
 /*
  * [netdump_prealloc_mbufs]
@@ -173,14 +183,14 @@ int reflist[NETDUMP_RESERVED];
 void
 netdump_prealloc_mbufs(){
 	int i;
-	for(i=0; i<NETDUMP_RESERVED; i++){
-		struct mbuf * m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
+	for(i = 0; i < NETDUMP_RESERVED; i++){
+		struct mbuf *m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
 		m->m_ext.ext_type = EXT_MOD_TYPE;
 		*(m->m_ext.ref_cnt) = 0;
 		txlist[i] = m;
 		txlist_head = i;
 		
-		m = m_get(M_DONTWAIT, MT_DATA); //TODO: Don't allocate memory for this if we're just going to leak it.
+		m = m_get(M_DONTWAIT, MT_DATA);
 		m->m_ext.ref_cnt = &reflist[i];
 		m->m_ext.ext_type = EXT_EXTREF;
 		*(m->m_ext.ref_cnt) = 0;
@@ -198,7 +208,8 @@ netdump_prealloc_mbufs(){
 /*
  * [netdump_free]
  *
- * Take the mbuf that is about to be freed, set its fields to 0s and append to the proper list.
+ * Take the mbuf that is about to be freed, 
+ * set its fields to 0s and append to the proper list.
  *
  * Parameters:
  *	m The mbuf to be 'freed'
@@ -207,40 +218,52 @@ netdump_prealloc_mbufs(){
  *	void
  */
  void
- netdump_free(struct mbuf * m){ //TODO: Deal with ref_cnt being off?
+ netdump_free(struct mbuf *m){
 	switch(m->m_ext.ext_type){
- 		case EXT_EXTREF: //m2
- 			//If room on end of array, append to it
- 			if (txlist2_head + 1 < NETDUMP_RESERVED && txlist2[txlist2_head+1] == NULL){
- 				txlist2_head = txlist2_head+1;
+ 		case EXT_EXTREF: /* m2 */
+ 			/*
+ 			 * If room on end of array, append to it
+ 			 */
+ 			if (txlist2_head + 1 < NETDUMP_RESERVED &&
+ 			    txlist2[txlist2_head + 1] == NULL){
+ 				txlist2_head = txlist2_head + 1;
 				txlist2[txlist2_head] = m;
 				*(m->m_ext.ref_cnt) -= 1;
 			}
 			break;
  		case EXT_MOD_TYPE: //m
- 			if (txlist_head + 1 < NETDUMP_RESERVED && txlist[txlist_head+1] == NULL){
- 				txlist_head = txlist_head+1;
+ 			if (txlist_head + 1 < NETDUMP_RESERVED &&
+ 			    txlist[txlist_head + 1] == NULL){
+ 				txlist_head = txlist_head + 1;
 				txlist[txlist_head] = m;
 				*(m->m_ext.ref_cnt) -= 1;
 			}
 			break;
  		case EXT_PACKET: //rx
-		 	if (rxlist_head + 1 < NETDUMP_RESERVED*2 && rxlist[rxlist_head+1] == NULL){
- 				rxlist_head = rxlist_head+1;
+		 	if (rxlist_head + 1 < NETDUMP_RESERVED*2 &&
+		 	    rxlist[rxlist_head + 1] == NULL){
+ 				rxlist_head = rxlist_head + 1;
 				rxlist[rxlist_head] = m;
 				*(m->m_ext.ref_cnt) -= 1;
 			}
 	}
-	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ //mb_free_ext
+
+	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ 
 		m->m_ext.ext_free = NULL;
 		m->m_ext.ext_arg1 = NULL;
 		m->m_ext.ext_arg2 = NULL;
-		m->m_ext.ext_type = 0;//This is given as an arg to netdump_alloc
+		m->m_ext.ext_type = 0;
 		m->m_ext.ext_flags = 0;
 	}
+
+	/*
+	 * If we have tags for some reason, leak them.
+	 * We don't care about them.
+	 */
 	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)){ 
-		m->m_pkthdr.tags.slh_first=NULL; //If we have tags for some reason, leak them
+		m->m_pkthdr.tags.slh_first=NULL;
 	}
+
  	return;
  }
 
@@ -734,6 +757,11 @@ netdump_send(uint32_t type, off_t offset,
 	uint32_t i, sent_so_far;
 
 	/* We might get chunks too big to fit in packets. Yuck. */
+	/*TODO: Even worse than that, any non-standerd-sized chunks could
+	 * mess with TFTP, as it treats packets that aren't full as EOF.
+	 * We might want a buffer in case part of this chunk won't fit
+	 * in the TFTP block size, and instead of sending close msg send
+	 * what is left over in the buffer. */
 	for (i=sent_so_far=0; sent_so_far < datalen || (i==0 && datalen==0);
 		i++) {
 		nd_seqno++;
@@ -775,7 +803,6 @@ retransmit:
 				printf("netdump_send: Out of mbufs! 2\n");
 				goto wait_for_ack;
 			}
-			//TODO: Instead of separate lists, maybe free ext separately and call that here
 			MEXTADD(m2, data+sent_so_far, pktlen, netdump_mbuf_nop,
 				NULL, NULL, M_RDONLY, EXT_EXTREF);
 			m2->m_len = pktlen;
@@ -783,13 +810,11 @@ retransmit:
 			m->m_pkthdr.len += m2->m_len;
 		}
 
-		//printf("In UDP output:\n");
 		if ((error = netdump_udp_output(m)) != 0) {
 			return error;
 		}
-		//printf("Called UDP output\n");
 		/*
-		 * wait for ack. a *real* window would speed things up considerably.
+		 * wait for ack. If none comes, retransmit
 		 */
 wait_for_ack:
 		polls=0;
@@ -804,14 +829,10 @@ wait_for_ack:
 			/*
 			 * this is not always necessary, but does no harm.
 			 */
-			//printf("In net poll:\n");
 			netdump_network_poll();
-			//printf("called net poll\n");
 			DELAY(500); /* 0.5 ms */
-			//goto retransmit;
 		}
 
-		//NETDDEBUG("nd_send: datalen = %d, sent=%d\n", datalen, sent_so_far);
 		sent_so_far += pktlen;
 	}
 	return 0;
@@ -995,7 +1016,6 @@ nd_handle_ip(struct mbuf **mb)
 		/* Do nothing: A duplicated past ACK */
 	} else {
 		/* We're interested in this ack. Record it. */
-		//printf("nd_handle_ip: ACK %d received!\n", rcv_ackno);
 		recvd_ack = 1;
 	}
 }
@@ -1268,6 +1288,7 @@ netdump_dumper(void *priv, void *virtual, vm_offset_t physical, off_t offset,
 	 * for the server to treat specially.  XXX: This doesn't strip out the
 	 * footer KDH, although it shouldn't hurt anything.
 	 */
+	 //TODO: Figure out how KDH will work for tftp
 	if (offset == 0 && length > 0)
 		msgtype = NETDUMP_KDH;
 	else if (offset > 0)

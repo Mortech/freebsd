@@ -35,7 +35,6 @@ __FBSDID("$FreeBSD$");
 #include "opt_param.h"
 #include "opt_mbuf_stress_test.h"
 #include "opt_mbuf_profiling.h"
-#include "opt_netdump.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
