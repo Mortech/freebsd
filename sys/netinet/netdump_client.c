@@ -248,7 +248,7 @@ netdump_prealloc_mbufs()
 			}
 			break;
 		default:
-			printf("NETDUMP_FREE: Freed invalid type %u\n",
+			printf("netdump_free: Freed invalid type %u\n",
 			    m->m_ext.ext_type);
 	}
 
@@ -267,8 +267,6 @@ netdump_prealloc_mbufs()
 	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)) { 
 		m->m_pkthdr.tags.slh_first = NULL;
 	}
-
- 	return;
  }
 
 /*
