@@ -780,22 +780,16 @@ WRQ_retransmit:
 	nd_msg_hdr->th_opcode = htons(WRQ);
 	wtail = nd_msg_hdr->th_stuff;
 	bcopy(filename, wtail, l + 1);
-	printf("%s\n", wtail);
 	wtail += l + 1;
 	bcopy("octet", wtail, 6);
-	printf("%s\n", wtail);
 	wtail += 6;
 	bcopy("rollover", wtail, 9);
-	printf("%s\n", wtail);
 	wtail += 9;
 	bcopy("0", wtail, 2);
-	printf("%s\n", wtail);
 	wtail += 2;
 	bcopy("blksize", wtail, 8);
-	printf("%s\n", wtail);
 	wtail += 8;
 	l = sprintf(wtail, "%d", NETDUMP_DATASIZE);
-	printf("%s\n", wtail);
 	wtail += l + 1;
 
 	if ((error = netdump_udp_output(m)) != 0) {
@@ -878,7 +872,8 @@ data_retransmit:
 			printf("netdump_send: Out of mbufs!\n");
 			goto data_wait_for_ack;
 		}
-		m->m_pkthdr.len = m->m_len = sizeof(struct tftphdr) - 1; //TODO: -1 because tftphdr includes 1byte of data. Make this better
+		/* XXX: This has -1 because tftphdr includes 1 byte of data */
+		m->m_pkthdr.len = m->m_len = sizeof(struct tftphdr) - 1;
 		/* leave room for udpip */
 		MH_ALIGN(m, sizeof(struct tftphdr) - 1);
 		nd_msg_hdr = mtod(m, struct tftphdr *);
