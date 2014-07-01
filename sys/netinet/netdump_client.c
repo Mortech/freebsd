@@ -149,7 +149,8 @@ static char nd_nic_tun[IFNAMSIZ];
 
 
 int recvd_ack;
-int blksize = NETDUMP_DATASIZE; //TODO: The purpose of this variable is so that we can adjust it later if the server doesn't send an OACK.
+//TODO: The purpose of this variable is so that we can adjust it later if the server doesn't send an OACK.
+int blksize = NETDUMP_DATASIZE;
 
 /* Indexes into my 'lists' */
 int txlist_head = -1;
@@ -709,7 +710,7 @@ netdump_send_arp()
  *	errno on error
  */
 static int
-netdump_arp_server() //TODO: We don't need to locate the server for TFTP.
+netdump_arp_server()
 {
 	int err, polls, retries;
 
@@ -753,6 +754,7 @@ netdump_WRQ(char *filename)
 	struct mbuf *m;
 	int retries, polls, error;
 	char * wtail;
+	char ndumpdatasize[8];
 
 	recvd_ack=0;
 	retries=0;
@@ -770,7 +772,7 @@ WRQ_retransmit:
 		goto WRQ_wait_for_ack;
 	}
 	int l = strlen(filename);
-	int d = 4; //TODO: Something better here
+	int d = sprintf(ndumpdatasize, "%d", NETDUMP_DATASIZE);
 	m->m_pkthdr.len = m->m_len = sizeof(struct tftphdr) + l + d + 25;
 	/* leave room for udpip */
 	MH_ALIGN(m, sizeof(struct tftphdr) + l + d + 25);
@@ -1091,13 +1093,13 @@ nd_handle_ip(struct mbuf **mb)
 	 */
 	nd_ack = (struct tftphdr *)
 		(mtod(m, caddr_t) + sizeof(struct udpiphdr));
-	if (nd_server_port == NETDUMP_PORT) { //TODO: COULD be a stale packet, might want to check ack type
-	    nd_server_port = ntohs(udp->ui_u.uh_sport);
-	}
-
-	if (ntohs(nd_ack->th_opcode) == OACK && nd_seqno == 0) {
+	unsigned short op = ntohs(nd_ack->th_opcode);
+	if (nd_server_port == NETDUMP_PORT && op == OACK) {
+		//TODO: ensure that that OACK accepts rollover
+		//TODO: check value for blocksize to ensure we were accepted
+		nd_server_port = ntohs(udp->ui_u.uh_sport);
 		recvd_ack = 1;
-	} else if (ntohs(nd_ack->th_opcode) == ACK) {
+	} else if (op == ACK) {
 		rcv_ackno = ntohs(nd_ack->th_block);
 		if (rcv_ackno > nd_seqno) {
 			printf("nd_handle_ip: ACK %d too far in future!\n", rcv_ackno);
@@ -1378,7 +1380,8 @@ netdump_dumper(void *priv, void *virtual, vm_offset_t physical, off_t offset,
 	 * footer KDH, although it shouldn't hurt anything.
 	 */
 	 //TODO: Write KDH as a separate file for now. Send WRQ before sending stuff to be written.
-	 //TODO: Last call to Dumper is with 0 Bytes, 
+	if (length == 0)
+		return 0;
 	if (offset == 0 && length > 0) {
 		if ((err = netdump_WRQ(INFO_FILENAME))) {
 			dump_failed = 1;
@@ -1498,8 +1501,7 @@ netdump_trigger(void *arg, int howto)
 	if (dump_failed) {
 		printf("Failed to dump the actual raw datas\n");
 		goto trig_abort;
-	} 
-	//TODO: Make sure tftp closes correctly
+	}
 	printf("\nnetdump finished.\n");
 	printf("cancelling normal dump\n");
 	set_dumper(NULL, NULL);
