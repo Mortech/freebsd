@@ -32,7 +32,7 @@
 
 #include <sys/types.h>
 
-#define	NETDUMP_PORT		20023	/* Server udp port number for data. */
+#define	NETDUMP_PORT		69	/* 69 is TFTP default port num */
 #define	NETDUMP_ACKPORT		20024	/* Client udp port number for acks. */
 
 #define	NETDUMP_HERALD		1	/* Broadcast before starting a dump. */
@@ -40,8 +40,11 @@
 #define	NETDUMP_VMCORE		3	/* Contains dump datas. */
 #define	NETDUMP_KDH		4	/* Contains kernel dump header. */
 
-#define	NETDUMP_DATASIZE	8192	/* Packets payload. */
+#define	NETDUMP_DATASIZE	1024	/* Packets payload. */
 #define NETDUMP_RESERVED	4
+#define TFTP_PORT		69
+#define VMCORE_FILENAME		"vmcore"
+#define INFO_FILENAME		"info"
 
 
 struct netdump_msg_hdr {

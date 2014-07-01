@@ -104,7 +104,7 @@ static time_t now;
 static time_t last_timeout_check;
 static int do_shutdown;
 static int sock;
-static uint32_t seq_no = 0; //TODO: Handle seq_no overflow, or else replace with actual TFTP code
+static uint32_t seq_no = 0;
 
 /* Daemon print functions hook. */
 static void (*phook)(int, const char *, ...);
@@ -389,7 +389,7 @@ send_ack(struct netdump_client *client, struct netdump_msg *msg)
     
 	assert(client != NULL && msg != NULL);
 
-	if(msg->nm_hdr.mh_seqno > seq_no){
+	if(msg->nm_hdr.mh_seqno == seq_no + 1){
 		seq_no = msg->nm_hdr.mh_seqno;
 	}
 
@@ -602,7 +602,7 @@ handle_packet(struct netdump_client *client, struct sockaddr_in *from,
 
 	if (client != NULL)
 		client->last_msg = time(NULL);
-	if (msg->nm_hdr.mh_seqno <= seq_no){
+	if (msg->nm_hdr.mh_seqno != seq_no + 1){
 		send_ack(client, msg);
 		return;
 	}

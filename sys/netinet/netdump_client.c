@@ -72,6 +72,7 @@
 #include <machine/in_cksum.h>
 #include <machine/pcb.h>
 
+#include "../../include/arpa/tftp.h"
 #ifdef DDB
 #include <ddb/ddb.h>
 #endif
@@ -110,7 +111,7 @@ static int	 netdump_mbuf_nop(struct mbuf *ignored, void *ptr,
 static int	 netdump_modevent(module_t mod, int type, void *unused); 
 static void	 netdump_network_poll(void);
 static void	 netdump_pkt_in(struct ifnet *ifp, struct mbuf *m);
-static int	 netdump_send(uint32_t type, off_t offset, unsigned char *data,
+static int	 netdump_send(off_t offset, unsigned char *data,
 		    uint32_t datalen);
 static int	 netdump_send_arp(void);
 static void	 netdump_trigger(void *arg, int howto);
@@ -123,7 +124,7 @@ static int	 sysctl_ip(SYSCTL_HANDLER_ARGS);
 static int	 sysctl_nic(SYSCTL_HANDLER_ARGS);
 
 static eventhandler_tag nd_tag = NULL;       /* record of our shutdown event */
-static uint32_t nd_seqno = 1;		     /* current sequence number */
+static unsigned short nd_seqno = 0;		     /* current sequence number */
 static int dump_failed, have_server_mac;
 static uint16_t nd_server_port = NETDUMP_PORT; /* port to respond on */
 static unsigned char buf[MAXDUMPPGS*PAGE_SIZE]; /* Must be at least as big as
@@ -148,6 +149,7 @@ static char nd_nic_tun[IFNAMSIZ];
 
 
 int recvd_ack;
+int blksize = NETDUMP_DATASIZE; //TODO: The purpose of this variable is so that we can adjust it later if the server doesn't send an OACK.
 
 /* Indexes into my 'lists' */
 int txlist_head = -1;
@@ -203,7 +205,7 @@ netdump_prealloc_mbufs()
 	}
 }
 
-
+//TODO: Don't add mbufs that we did not allocate onto the list!!
 /*
  * [netdump_free]
  *
@@ -707,7 +709,7 @@ netdump_send_arp()
  *	errno on error
  */
 static int
-netdump_arp_server()
+netdump_arp_server() //TODO: We don't need to locate the server for TFTP.
 {
 	int err, polls, retries;
 
@@ -734,6 +736,92 @@ netdump_arp_server()
 }
 
 /*
+ * [netdump_WRQ]
+ *
+ * Sends write request to server
+ *
+ * Parameters:
+ *	filename	string containing the name of the file to write into
+ *
+ * Return value:
+ *	0 on success
+ *	errno on error
+ */
+static int
+netdump_WRQ(char *filename)
+{
+	struct mbuf *m;
+	int retries, polls, error;
+	char * wtail;
+
+	recvd_ack=0;
+	retries=0;
+	nd_seqno = 0;
+	nd_server_port = NETDUMP_PORT;
+
+WRQ_retransmit:
+	/*
+	 * get and fill a header mbuf, then chain data as an extended
+	 * mbuf.
+	 */
+	m = m_gethdr(M_NOWAIT, MT_DATA);
+	if (m == NULL) {
+		printf("netdump_send: Out of mbufs!\n");
+		goto WRQ_wait_for_ack;
+	}
+	int l = strlen(filename);
+	int d = 4; //TODO: Something better here
+	m->m_pkthdr.len = m->m_len = sizeof(struct tftphdr) + l + d + 25;
+	/* leave room for udpip */
+	MH_ALIGN(m, sizeof(struct tftphdr) + l + d + 25);
+	struct tftphdr *nd_msg_hdr = mtod(m, struct tftphdr *);
+	nd_msg_hdr->th_opcode = htons(WRQ);
+	wtail = nd_msg_hdr->th_stuff;
+	bcopy(filename, wtail, l + 1);
+	printf("%s\n", wtail);
+	wtail += l + 1;
+	bcopy("octet", wtail, 6);
+	printf("%s\n", wtail);
+	wtail += 6;
+	bcopy("rollover", wtail, 9);
+	printf("%s\n", wtail);
+	wtail += 9;
+	bcopy("0", wtail, 2);
+	printf("%s\n", wtail);
+	wtail += 2;
+	bcopy("blksize", wtail, 8);
+	printf("%s\n", wtail);
+	wtail += 8;
+	l = sprintf(wtail, "%d", NETDUMP_DATASIZE);
+	printf("%s\n", wtail);
+	wtail += l + 1;
+
+	if ((error = netdump_udp_output(m)) != 0) {
+		return error;
+	}
+	/*
+	 * wait for ack. If none comes, retransmit
+	 */
+WRQ_wait_for_ack:
+	polls=0;
+	while (!recvd_ack) {		
+		if (polls++ > nd_polls) {
+			if (retries++ > nd_retries) {
+				return ETIMEDOUT; /* 10 s, no ack */
+			}
+			printf(". ");
+			goto WRQ_retransmit; /* 1 s, no ack */
+		}
+		/*
+		 * this is not always necessary, but does no harm.
+		 */
+		netdump_network_poll();
+		DELAY(500); /* 0.5 ms */
+	}
+	return 0;
+}
+
+/*
  * [netdump_send]
  *
  * construct and reliably send a netdump packet.  may fail from a resource
@@ -751,36 +839,34 @@ netdump_arp_server()
  *	int see errno.h, 0 for success
  */
 static int
-netdump_send(uint32_t type, off_t offset, 
+netdump_send(off_t offset, 
 	     unsigned char *data, uint32_t datalen)
 {
-	struct netdump_msg_hdr *nd_msg_hdr;
+	struct tftphdr *nd_msg_hdr;
 	struct mbuf *m, *m2;
-	int retries = 0, polls, error;
+	int retries, polls, error;
 	uint32_t i, sent_so_far;
 
 	/* We might get chunks too big to fit in packets. Yuck. */
-	/*TODO: Even worse than that, any non-standerd-sized chunks could
-	 * mess with TFTP, as it treats packets that aren't full as EOF.
-	 * We might want a buffer in case part of this chunk won't fit
-	 * in the TFTP block size, and instead of sending close msg send
-	 * what is left over in the buffer. */
+	/* TODO: We are going to go with a block size of 1024, 
+	 * which will allow all pages to fit into data blocks
+	 * - except for KDH header and trailer, which are 512 and
+	 * should be treated as EOF. */
 	for (i=sent_so_far=0; sent_so_far < datalen || (i==0 && datalen==0);
 		i++) {
 		nd_seqno++;
 		recvd_ack=0;
 		retries=0;
-		polls=0;
 
 
 		uint32_t pktlen = datalen-sent_so_far;
 		/* First bound: the packet structure */
-		pktlen = min(pktlen, NETDUMP_DATASIZE);
+		pktlen = min(pktlen, blksize);
 		/* Second bound: the interface MTU (assume no IP options) */
 		pktlen = min(pktlen, nd_nic->if_mtu -
 				sizeof(struct udpiphdr) -
 				sizeof(struct netdump_msg_hdr));
-retransmit:
+data_retransmit:
 		/*
 		 * get and fill a header mbuf, then chain data as an extended
 		 * mbuf.
@@ -788,23 +874,20 @@ retransmit:
 		m = m_gethdr(M_NOWAIT, MT_DATA);
 		if (m == NULL) {
 			printf("netdump_send: Out of mbufs!\n");
-			goto wait_for_ack;
+			goto data_wait_for_ack;
 		}
-		m->m_pkthdr.len = m->m_len = sizeof(struct netdump_msg_hdr);
+		m->m_pkthdr.len = m->m_len = sizeof(struct tftphdr) - 1; //TODO: -1 because tftphdr includes 1byte of data. Make this better
 		/* leave room for udpip */
-		MH_ALIGN(m, sizeof(struct netdump_msg_hdr));
-		nd_msg_hdr = mtod(m, struct netdump_msg_hdr *);
-		nd_msg_hdr->mh_seqno = htonl(nd_seqno);
-		nd_msg_hdr->mh_type = htonl(type);
-		nd_msg_hdr->mh_offset = htobe64(offset + sent_so_far);
-		nd_msg_hdr->mh_len = htonl(pktlen);
-		nd_msg_hdr->mh__pad = 0;
+		MH_ALIGN(m, sizeof(struct tftphdr) - 1);
+		nd_msg_hdr = mtod(m, struct tftphdr *);
+		nd_msg_hdr->th_block = htons(nd_seqno);
+		nd_msg_hdr->th_opcode = htons(DATA);
 
 		if (pktlen) {
 			if ((m2=m_get(M_DONTWAIT, MT_DATA)) == NULL) {
 				m_freem(m);
 				printf("netdump_send: Out of mbufs! 2\n");
-				goto wait_for_ack;
+				goto data_wait_for_ack;
 			}
 			MEXTADD(m2, data+sent_so_far, pktlen, netdump_mbuf_nop,
 				NULL, NULL, M_RDONLY, EXT_EXTREF);
@@ -819,7 +902,7 @@ retransmit:
 		/*
 		 * wait for ack. If none comes, retransmit
 		 */
-wait_for_ack:
+data_wait_for_ack:
 		polls=0;
 		while (!recvd_ack) {		
 			if (polls++ > nd_polls) {
@@ -827,7 +910,7 @@ wait_for_ack:
 					return ETIMEDOUT; /* 10 s, no ack */
 				}
 				printf(". ");
-				goto retransmit; /* 1 s, no ack */
+				goto data_retransmit; /* 1 s, no ack */
 			}
 			/*
 			 * this is not always necessary, but does no harm.
@@ -864,9 +947,9 @@ nd_handle_ip(struct mbuf **mb)
 	unsigned short hlen;
 	struct ip *ip;
 	struct udpiphdr *udp;
-	struct netdump_ack *nd_ack;
+	struct tftphdr *nd_ack;
 	struct mbuf *m;
-	int rcv_ackno;
+	unsigned short rcv_ackno;
 
 	/* IP processing */
 	m = *mb;
@@ -1000,26 +1083,30 @@ nd_handle_ip(struct mbuf **mb)
 
 	/* UDP done */
 	/* Netdump processing */
+	//TODO: Check for error, return error somehow
 
 	/*
 	 * packet is meant for us.  extract the ack sequence number.
 	 * if it's the first ack, extract the port number as well
 	 */
-	nd_ack = (struct netdump_ack *)
+	nd_ack = (struct tftphdr *)
 		(mtod(m, caddr_t) + sizeof(struct udpiphdr));
-	rcv_ackno = ntohl(nd_ack->na_seqno);
-
-	if (nd_server_port == NETDUMP_PORT) {
+	if (nd_server_port == NETDUMP_PORT) { //TODO: COULD be a stale packet, might want to check ack type
 	    nd_server_port = ntohs(udp->ui_u.uh_sport);
 	}
 
-	if (rcv_ackno > nd_seqno) {
-		printf("nd_handle_ip: ACK %d too far in future!\n", rcv_ackno);
-	} else if (rcv_ackno < nd_seqno) {
-		/* Do nothing: A duplicated past ACK */
-	} else {
-		/* We're interested in this ack. Record it. */
+	if (ntohs(nd_ack->th_opcode) == OACK && nd_seqno == 0) {
 		recvd_ack = 1;
+	} else if (ntohs(nd_ack->th_opcode) == ACK) {
+		rcv_ackno = ntohs(nd_ack->th_block);
+		if (rcv_ackno > nd_seqno) {
+			printf("nd_handle_ip: ACK %d too far in future!\n", rcv_ackno);
+		} else if (rcv_ackno < nd_seqno) {
+			/* Do nothing: A duplicated past ACK */
+		} else {
+			/* We're interested in this ack. Record it. */
+			recvd_ack = 1;
+		}
 	}
 }
 
@@ -1277,7 +1364,6 @@ netdump_dumper(void *priv, void *virtual, vm_offset_t physical, off_t offset,
 		size_t length)
 {
 	int err;
-	int msgtype = NETDUMP_VMCORE;
 
 	(void)priv;
 
@@ -1291,14 +1377,24 @@ netdump_dumper(void *priv, void *virtual, vm_offset_t physical, off_t offset,
 	 * for the server to treat specially.  XXX: This doesn't strip out the
 	 * footer KDH, although it shouldn't hurt anything.
 	 */
-	 //TODO: Figure out how KDH will work for tftp
-	if (offset == 0 && length > 0)
-		msgtype = NETDUMP_KDH;
-	else if (offset > 0)
+	 //TODO: Write KDH as a separate file for now. Send WRQ before sending stuff to be written.
+	 //TODO: Last call to Dumper is with 0 Bytes, 
+	if (offset == 0 && length > 0) {
+		if ((err = netdump_WRQ(INFO_FILENAME))) {
+			dump_failed = 1;
+			return err;
+		}
+	} else if (offset == sizeof(struct kerneldumpheader)) {
+		if ((err = netdump_WRQ(VMCORE_FILENAME))) {
+			dump_failed = 1;
+			return err;
+		}
+	}
+	if (offset > 0)
 		offset -= sizeof(struct kerneldumpheader);
 
 	memcpy(buf, virtual, length);
-	err=netdump_send(msgtype, offset, buf, length);
+	err=netdump_send(offset, buf, length);
 	if (err) {
 		dump_failed = 1;
 		return err;
@@ -1383,10 +1479,6 @@ netdump_trigger(void *arg, int howto)
 		printf("Failed to locate server MAC address\n");
 		goto trig_abort;
 	}
-	if (netdump_send(NETDUMP_HERALD, 0, NULL, 0) != 0) {
-		printf("Failed to contact netdump server\n");
-		goto trig_abort;
-	}
 	printf("dumping to %s (%6D)\n", inet_ntoa(nd_server),
 			nd_gw_mac.octet, ":");
 	printf("-----------------------------------\n");
@@ -1406,12 +1498,8 @@ netdump_trigger(void *arg, int howto)
 	if (dump_failed) {
 		printf("Failed to dump the actual raw datas\n");
 		goto trig_abort;
-	}
-
-	if (netdump_send(NETDUMP_FINISHED, 0, NULL, 0) != 0) {
-		printf("Failed to close the transaction\n");
-		goto trig_abort;
-	}
+	} 
+	//TODO: Make sure tftp closes correctly
 	printf("\nnetdump finished.\n");
 	printf("cancelling normal dump\n");
 	set_dumper(NULL, NULL);
