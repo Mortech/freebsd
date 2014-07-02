@@ -42,27 +42,8 @@
 
 #define	NETDUMP_DATASIZE	1024	/* Packets payload. */
 #define NETDUMP_RESERVED	4
-#define TFTP_PORT		69
-#define VMCORE_FILENAME		"vmcore"
-#define INFO_FILENAME		"info"
-
-
-struct netdump_msg_hdr {
-	uint32_t	mh_type; /* NETDUMP_HERALD, _FINISHED, _VMCORE, _KDH. */
-	uint32_t	mh_seqno;	/* Match acks with msgs. */
-	uint64_t	mh_offset;	/* vmcore offset (bytes). */
-	uint32_t	mh_len;		/* Attached data (bytes). */
-	uint32_t	mh__pad; /* Pad space matching 32- and 64-bits archs. */
-};
-
-struct netdump_ack {
-	uint32_t	na_seqno;	/* Match acks with msgs. */
-};
-
-struct netdump_msg {
-	struct netdump_msg_hdr nm_hdr;
-	uint8_t		nm_data[NETDUMP_DATASIZE];
-};
+#define VMCORE_FILENAME		"vmcore.recent"
+#define INFO_FILENAME		"info.recent"
 
 #ifdef _KERNEL
 

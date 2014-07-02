@@ -149,6 +149,7 @@ static char nd_nic_tun[IFNAMSIZ];
 
 
 int recvd_ack;
+int tftp_error = 0;
 //TODO: The purpose of this variable is so that we can adjust it later if the server doesn't send an OACK.
 int blksize = NETDUMP_DATASIZE;
 
@@ -814,6 +815,8 @@ WRQ_wait_for_ack:
 		netdump_network_poll();
 		DELAY(500); /* 0.5 ms */
 	}
+	if (tftp_error)
+			return ENOTSUP;
 	return 0;
 }
 
@@ -861,7 +864,7 @@ netdump_send(off_t offset,
 		/* Second bound: the interface MTU (assume no IP options) */
 		pktlen = min(pktlen, nd_nic->if_mtu -
 				sizeof(struct udpiphdr) -
-				sizeof(struct netdump_msg_hdr));
+				sizeof(struct tftphdr) + 1);
 data_retransmit:
 		/*
 		 * get and fill a header mbuf, then chain data as an extended
@@ -915,7 +918,8 @@ data_wait_for_ack:
 			netdump_network_poll();
 			DELAY(500); /* 0.5 ms */
 		}
-
+		if (tftp_error)
+			return ENOTSUP;
 		sent_so_far += pktlen;
 	}
 	return 0;
@@ -1061,13 +1065,13 @@ nd_handle_ip(struct mbuf **mb)
 
 	/* Get IP and UDP headers together, along with the netdump packet */
 	if (m->m_pkthdr.len <
-	    sizeof(struct udpiphdr) + sizeof(struct netdump_ack)) {
+	    sizeof(struct udpiphdr) + sizeof(unsigned short)) {
 		NETDDEBUG("nd_handle_ip: Ignoring small packet\n");
 		return;
 	}
-	if (m->m_len < sizeof(struct udpiphdr) + sizeof(struct netdump_ack) &&
+	if (m->m_len < sizeof(struct udpiphdr) + sizeof(unsigned short) &&
 	    (*mb = m = m_pullup(m, sizeof(struct udpiphdr) +
-	    sizeof(struct netdump_ack))) == NULL) {
+	    sizeof(struct tftphdr))) == NULL) {
 		NETDDEBUG("nd_handle_ip: m_pullup failed\n");
 		return;
 	}
@@ -1080,7 +1084,6 @@ nd_handle_ip(struct mbuf **mb)
 
 	/* UDP done */
 	/* Netdump processing */
-	//TODO: Check for error, return error somehow
 
 	/*
 	 * packet is meant for us.  extract the ack sequence number.
@@ -1090,17 +1093,53 @@ nd_handle_ip(struct mbuf **mb)
 		(mtod(m, caddr_t) + sizeof(struct udpiphdr));
 	unsigned short op = ntohs(nd_ack->th_opcode);
 	if (nd_server_port == NETDUMP_PORT && op == OACK) {
-		//TODO: ensure that that OACK accepts rollover
+		//TODO: ensure that that OACK accepts rollover - UNTESTED
 		//TODO: check value for blocksize to ensure we were accepted
+		/* If we can't rollover, the dump will likely fail, so return error */
+		char *tftp_options[128] = { 0 };
+		int i = 0;
+		int option_idx = 0;
+		int len = m->m_len - sizeof(struct udpiphdr) - sizeof(unsigned short);
+		char *buf = nd_ack->th_stuff;
+		char *val = buf;
+		while (option_idx < 128 && i < len) {
+			if (buf[i] == '\0') {
+				if (&buf[i] > val) {
+					tftp_options[option_idx] = val;
+					val = &buf[i] + 1;
+					++option_idx;
+				}
+			}
+			++i;
+		}
+		int rollover_accept = 0;
+		int blksize_accept = 512;
+		for (i = 0; i < option_idx; i += 2) {
+		    if (strcasecmp(tftp_options[i], "blksize") == 0) {
+			if (i + 1 < option_idx)
+				blksize_accept = 1024;
+		    } else if (strcasecmp(tftp_options[i], "rollover") == 0) {
+			if (i + 1 < option_idx)
+				rollover_accept = 1;
+		    } else {
+			/* Do not allow any options we did not expect to be ACKed. */
+			printf("unexpected tftp option '%s'\n", tftp_options[i]);
+			tftp_error = 1;
+			recvd_ack = 1;
+		    }
+		}
+		if (!rollover_accept) {
+			tftp_error = 1;
+			recvd_ack = 1;
+		}
 		nd_server_port = ntohs(udp->ui_u.uh_sport);
+		recvd_ack = 1;
+	} else if ((op == ACK && nd_server_port == NETDUMP_PORT) || op == ERROR) { //TODO: may not indicate failure
+		tftp_error = 1;
 		recvd_ack = 1;
 	} else if (op == ACK) {
 		rcv_ackno = ntohs(nd_ack->th_block);
-		if (rcv_ackno > nd_seqno) {
-			printf("nd_handle_ip: ACK %d too far in future!\n", rcv_ackno);
-		} else if (rcv_ackno < nd_seqno) {
-			/* Do nothing: A duplicated past ACK */
-		} else {
+		if (rcv_ackno == nd_seqno) {
 			/* We're interested in this ack. Record it. */
 			recvd_ack = 1;
 		}
@@ -1285,7 +1324,6 @@ netdump_pkt_in(struct ifnet *ifp, struct mbuf *m)
 		NETDDEBUG_IF(ifp, "ignoring vlan packets\n");
 		goto done;
 	}
-	/* XXX: Probably should check if we're the recipient MAC address */
 	/* Done ethernet processing. Strip off the ethernet header */
 	m_adj(m, ETHER_HDR_LEN);
 
