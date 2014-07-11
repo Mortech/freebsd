@@ -72,6 +72,7 @@
 #include <machine/in_cksum.h>
 #include <machine/pcb.h>
 
+/* XXXNJ: Needs cleanup */
 #include "../../include/arpa/tftp.h"
 #ifdef DDB
 #include <ddb/ddb.h>
@@ -163,7 +164,11 @@ int txlist2_head = -1;
  */
 struct mbuf *txlist[NETDUMP_RESERVED];
 struct mbuf *txlist2[NETDUMP_RESERVED];
-struct mbuf *rxlist[NETDUMP_RESERVED * 2];
+struct mbuf *rxlist[NETDUMP_RESERVED];
+
+struct mbuf txdata[NETDUMP_RESERVED];
+struct mbuf txdata2[NETDUMP_RESERVED];
+struct mbuf rxdata[NETDUMP_RESERVED];
 
 /*
  * references for m2
@@ -187,20 +192,28 @@ netdump_prealloc_mbufs()
 {
 	int i;
 	for(i = 0; i < NETDUMP_RESERVED; i++) {
-		struct mbuf *m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
+		struct mbuf *m = &txdata[i];
+		m_clget(m, M_NOWAIT);
 		m->m_ext.ext_type = EXT_MOD_TYPE;
+		m->m_flags = M_PKTHDR;
+		m->m_type = MT_DATA;
 		*(m->m_ext.ref_cnt) = 0;
 		txlist[i] = m;
 		txlist_head = i;
 		
-		m = m_get(M_DONTWAIT, MT_DATA);
+		m = &txdata2[i];
 		m->m_ext.ref_cnt = &reflist[i];
 		m->m_ext.ext_type = EXT_EXTREF;
+		m->m_flags = 0;
+		m->m_type = MT_DATA;
 		*(m->m_ext.ref_cnt) = 0;
 		txlist2[i] = m;
 		txlist2_head = i;
 
-		m = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
+		m = &rxdata[i];
+		m_clget(m, M_NOWAIT);
+		m->m_flags = M_PKTHDR;
+		m->m_type = MT_DATA;
 		*(m->m_ext.ref_cnt) = 0;
 		rxlist[i] = m;
 		rxlist_head = i;
@@ -226,6 +239,12 @@ netdump_prealloc_mbufs()
 	switch(m->m_ext.ext_type) {
  		case EXT_EXTREF:
  			/*
+ 			 * If not part of the mbufs I allocated, ignore it
+ 			 */
+ 			if (m < &txdata2[0] || m >= &txdata2[NETDUMP_RESERVED]) {
+ 				return;
+ 			}
+ 			/*
  			 * If room on end of array, append to it
  			 */
  			if (txlist2_head + 1 < NETDUMP_RESERVED &&
@@ -236,6 +255,9 @@ netdump_prealloc_mbufs()
 			}
 			break;
  		case EXT_MOD_TYPE:
+ 			if (m < &txdata[0] || m >= &txdata[NETDUMP_RESERVED]) {
+ 				return;
+ 			}
  			if (txlist_head + 1 < NETDUMP_RESERVED &&
  			    txlist[txlist_head + 1] == NULL) {
  				txlist_head = txlist_head + 1;
@@ -244,6 +266,9 @@ netdump_prealloc_mbufs()
 			}
 			break;
  		case EXT_PACKET:
+ 			if (m < &rxdata[0] || m >= &rxdata[NETDUMP_RESERVED]) {
+ 				return;
+ 			}
 		 	if (rxlist_head + 1 < NETDUMP_RESERVED * 2 &&
 		 	    rxlist[rxlist_head + 1] == NULL) {
  				rxlist_head = rxlist_head + 1;
@@ -1134,11 +1159,15 @@ nd_handle_ip(struct mbuf **mb)
 		}
 		nd_server_port = ntohs(udp->ui_u.uh_sport);
 		recvd_ack = 1;
-	} else if ((op == ACK && nd_server_port == NETDUMP_PORT) || op == ERROR) { //TODO: may not indicate failure
+	} else if (op == ERROR) {
 		tftp_error = 1;
 		recvd_ack = 1;
 	} else if (op == ACK) {
 		rcv_ackno = ntohs(nd_ack->th_block);
+		if (nd_server_port == NETDUMP_PORT && nd_seqno == rcv_ackno) {
+			tftp_error = 1;
+			recvd_ack = 1;
+		}
 		if (rcv_ackno == nd_seqno) {
 			/* We're interested in this ack. Record it. */
 			recvd_ack = 1;
@@ -1574,7 +1603,7 @@ netdump_config_defaults()
 	int found;
 	recvd_ack=0;
 
-	//TODO: Remove my constants from this!
+	//XXXNJ: TODO: Remove my constants from this!
 	found = 0;
 	IFNET_RLOCK_NOSLEEP();
 	TAILQ_FOREACH(ifn, &V_ifnet, if_link) {
