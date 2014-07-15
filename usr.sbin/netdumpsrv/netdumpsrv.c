@@ -35,9 +35,8 @@ __FBSDID("$FreeBSD$");
 #include <sys/stat.h>
 
 #include <arpa/inet.h>
-#include <arpa/tftp.h>
 #include <netinet/in.h>
-#include "../../sys/netinet/netdump.h"
+#include <../../sys/netinet/netdump.h>
 
 #include <fcntl.h>
 #include <libutil.h>
@@ -88,8 +87,6 @@ struct netdump_client {
 	int		sock;
 	unsigned short	printed_port_warning: 1;
 	unsigned short	any_data_rcvd: 1;
-	unsigned short	info: 1;
-	unsigned short	seqno;
 };
 
 /* Clients list. */
@@ -244,6 +241,8 @@ alloc_client(struct sockaddr_in *sip)
 		LOGERR_PERROR("setsockopt()");
 	LOGWARN("May drop packets from %s due to small receive buffer\n",
 		    client->hostname);
+
+
 	}
 
 	/* Try info.host.0 through info.host.255 in sequence. */
@@ -331,6 +330,8 @@ exec_handler(struct netdump_client *client, const char *reason)
 
 	pid = fork();
 
+
+
 	/*
 	 * The function is invoked in critical conditions, thus just exiting
 	 * without reporting errors is fine.
@@ -384,16 +385,14 @@ timeout_clients(void)
 }
 
 static void
-send_ack(struct netdump_client *client, struct tftphdr *msg)
+send_ack(struct netdump_client *client, struct netdump_msg *msg)
 {
 	struct netdump_ack ack;
 	int tryagain;
+
+
     
 	assert(client != NULL && msg != NULL);
-
-	if(msg->nm_hdr.mh_seqno == seq_no + 1){
-		seq_no = msg->nm_hdr.mh_seqno;
-	}
 
 	bzero(&ack, sizeof(ack));
 	ack.na_seqno = htonl(msg->nm_hdr.mh_seqno);
@@ -417,18 +416,17 @@ send_ack(struct netdump_client *client, struct tftphdr *msg)
 }
 
 static void
-handle_wrq(struct sockaddr_in *from, struct netdump_client *client,
-    struct tftphdr *msg, int len)
+handle_herald(struct sockaddr_in *from, struct netdump_client *client,
+    struct netdump_msg *msg)
 {
 
 	assert(from != NULL && msg != NULL);
 
 	if (client != NULL) {
 		if (client->any_data_rcvd == 0) {
-			//TODO: check name of file to be written for info / vmcore
 
-			/* Must be a retransmit of the WRQ. */
-			send_oack(client, msg);
+			/* Must be a retransmit of the herald packet. */
+			send_ack(client, msg);
 			return;
 		}
 
@@ -449,7 +447,7 @@ handle_wrq(struct sockaddr_in *from, struct netdump_client *client,
 }
 
 static void
-handle_kdh(struct netdump_client *client, struct tftphdr *msg, int len)
+handle_kdh(struct netdump_client *client, struct netdump_msg *msg)
 {
 	time_t t;
 	uint64_t dumplen;
@@ -462,7 +460,7 @@ handle_kdh(struct netdump_client *client, struct tftphdr *msg, int len)
 		return;
 
 	client->any_data_rcvd = 1;
-	h = (struct kerneldumpheader *)((void *)msg->th_data);
+	h = (struct kerneldumpheader *)(void *)msg->nm_data;
 	if (msg->nm_hdr.mh_len < sizeof(struct kerneldumpheader)) {
 		LOGERR("Bad KDH from %s [%s]: packet too small\n",
 		    client->hostname, client_ntoa(client));
@@ -500,7 +498,7 @@ handle_kdh(struct netdump_client *client, struct tftphdr *msg, int len)
 }
 
 static void
-handle_vmcore(struct netdump_client *client, struct tftphdr *msg, int len)
+handle_vmcore(struct netdump_client *client, struct netdump_msg *msg)
 {
 
 	assert(msg != NULL);
@@ -526,11 +524,10 @@ handle_vmcore(struct netdump_client *client, struct tftphdr *msg, int len)
 		return;
 	}
 	send_ack(client, msg);
-	if (len != )
 }
 
 static void
-handle_finish(struct netdump_client *client, struct tftphdr *msg)
+handle_finish(struct netdump_client *client, struct netdump_msg *msg)
 {
 
 	assert(msg != NULL);
@@ -541,6 +538,7 @@ handle_finish(struct netdump_client *client, struct tftphdr *msg)
 	LOGINFO("\nCompleted dump from client %s [%s]\n", client->hostname,
 	    client_ntoa(client));
 	client_pinfo(client, "Dump complete\n");
+	send_ack(client, msg);
 	exec_handler(client, "success");
 	free_client(client);
 }
@@ -548,7 +546,7 @@ handle_finish(struct netdump_client *client, struct tftphdr *msg)
 
 static int
 receive_message(int isock, struct sockaddr_in *from, char *fromstr,
-    size_t fromstrlen, struct tftphdr *msg)
+    size_t fromstrlen, struct netdump_msg *msg)
 {
 	socklen_t fromlen;
 	ssize_t len;
@@ -561,7 +559,7 @@ receive_message(int isock, struct sockaddr_in *from, char *fromstr,
 	from->sin_port = 0;
 	from->sin_addr.s_addr = INADDR_ANY;
 
-	len = recvfrom(isock, msg, MAXPKTSIZE, 0, (struct sockaddr *)from,
+	len = recvfrom(isock, msg, sizeof(*msg), 0, (struct sockaddr *)from,
 	    &fromlen);
 	if (len == -1) {
 
@@ -582,7 +580,10 @@ receive_message(int isock, struct sockaddr_in *from, char *fromstr,
 	}
 
 	/* Convert byte order. */
-	msg->th_opcode = ntohs(msg->th_opcode);
+	msg->nm_hdr.mh_type = ntohl(msg->nm_hdr.mh_type);
+	msg->nm_hdr.mh_seqno = ntohl(msg->nm_hdr.mh_seqno);
+	msg->nm_hdr.mh_offset = be64toh(msg->nm_hdr.mh_offset);
+	msg->nm_hdr.mh_len = ntohl(msg->nm_hdr.mh_len);
 
 	if ((size_t)len < sizeof(struct netdump_msg_hdr) + msg->nm_hdr.mh_len) {
 		LOGERR("Packet too small from %s (got %zu, expected %zu)\n",
@@ -595,24 +596,26 @@ receive_message(int isock, struct sockaddr_in *from, char *fromstr,
 
 static void
 handle_packet(struct netdump_client *client, struct sockaddr_in *from,
-    const char *fromstr, struct tftphdr *msg, int len)
+    const char *fromstr, struct netdump_msg *msg)
+{
 
 	assert(from != NULL && fromstr != NULL && msg != NULL);
 
 	if (client != NULL)
 		client->last_msg = time(NULL);
 
-
-	switch (msg->th_opcode) {
-	case WRQ:
-		handle_wrq(from, client, msg, len);
+	switch (msg->nm_hdr.mh_type) {
+	case NETDUMP_HERALD:
+		handle_herald(from, client, msg);
 		break;
-	case DATA:
-		if (clinet->info){
-			handle_kdh(client, msg, len);
-		} else {
-			handle_vmcore(client, msg, len);
-		}
+	case NETDUMP_KDH:
+		handle_kdh(client, msg);
+		break;
+	case NETDUMP_VMCORE:
+		handle_vmcore(client, msg);
+		break;
+	case NETDUMP_FINISHED:
+		handle_finish(client, msg);
 		break;
 	default:
 		LOGERR("Received unknown message type %d from %s\n",
@@ -623,7 +626,7 @@ handle_packet(struct netdump_client *client, struct sockaddr_in *from,
 static void
 eventloop(void)
 {
-	struct tftphdr msg;
+	struct netdump_msg msg;
 	char fromstr[INET_ADDRSTRLEN + 6];
 	fd_set readfds;
 	struct sockaddr_in from;
@@ -695,17 +698,14 @@ eventloop(void)
 				 * this by suppressing the error on HERALD
 				 * packets.
 				 */
-				 //TODO: Make this part of program's control flow
-				 // ie client sends KDH, but don't destroy client
-				 // until after data written
 				if (client != NULL &&
-				    msg.th_opcode != WRQ &&
+				    msg.nm_hdr.mh_type != NETDUMP_HERALD &&
 				    client->printed_port_warning == 0) {
 			    LOGWARN("Client %s responding on server port\n",
 					    client->hostname);
 					client->printed_port_warning = 1;
 				}
-				handle_packet(client, &from, fromstr, &msg, len);
+				handle_packet(client, &from, fromstr, &msg);
 			}
 		}
 
@@ -737,7 +737,7 @@ eventloop(void)
 
 					FD_CLR(client->sock, &readfds);
 					handle_packet(client, &from, fromstr,
-					    &msg, len);
+					    &msg);
 				}
 			}
 		}

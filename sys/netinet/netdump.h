@@ -32,7 +32,7 @@
 
 #include <sys/types.h>
 
-#define	NETDUMP_PORT		69	/* 69 is TFTP default port num */
+#define	NETDUMP_PORT		20023	/* 69 is TFTP default port num */
 #define	NETDUMP_ACKPORT		20024	/* Client udp port number for acks. */
 
 #define	NETDUMP_HERALD		1	/* Broadcast before starting a dump. */
@@ -40,10 +40,26 @@
 #define	NETDUMP_VMCORE		3	/* Contains dump datas. */
 #define	NETDUMP_KDH		4	/* Contains kernel dump header. */
 
-#define	NETDUMP_DATASIZE	1024	/* Packets payload. */
-#define NETDUMP_RESERVED	4
-#define VMCORE_FILENAME		"vmcore.recent"
-#define INFO_FILENAME		"info.recent"
+#define	NETDUMP_DATASIZE	8192	/* Packets payload. */
+#define NETDUMP_RESERVED	8
+
+
+struct netdump_msg_hdr {
+	uint32_t mh_type; /* NETDUMP_HERALD, _FINISHED, _VMCORE, _KDH. */
+	uint32_t mh_seqno; /* Match acks with msgs. */
+	uint64_t mh_offset; /* vmcore offset (bytes). */
+	uint32_t mh_len; /* Attached data (bytes). */
+	uint32_t mh__pad; /* Pad space matching 32- and 64-bits archs. */
+};
+
+struct netdump_ack {
+	uint32_t na_seqno; /* Match acks with msgs. */
+};
+
+struct netdump_msg {
+	struct netdump_msg_hdr nm_hdr;
+	uint8_t nm_data[NETDUMP_DATASIZE];
+};
 
 #ifdef _KERNEL
 
