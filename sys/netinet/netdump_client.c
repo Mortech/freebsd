@@ -125,7 +125,7 @@ static int	 sysctl_ip(SYSCTL_HANDLER_ARGS);
 static int	 sysctl_nic(SYSCTL_HANDLER_ARGS);
 
 static eventhandler_tag nd_tag = NULL;       /* record of our shutdown event */
-static uint32_t nd_seqno = 0;		     /* current sequence number */
+static uint32_t nd_seqno = 1;		     /* current sequence number */
 static int dump_failed, have_server_mac;
 static uint16_t nd_server_port = NETDUMP_PORT; /* port to respond on */
 static unsigned char buf[MAXDUMPPGS*PAGE_SIZE]; /* Must be at least as big as
@@ -783,35 +783,28 @@ netdump_arp_server()
  *	int see errno.h, 0 for success
  */
 static int
-netdump_send(uint32_t type, off_t offset, //TODO: Fix this function so that it no longer does TFTP
+netdump_send(uint32_t type, off_t offset, 
 	     unsigned char *data, uint32_t datalen)
 {
 	struct netdump_msg_hdr *nd_msg_hdr;
 	struct mbuf *m, *m2;
-	int retries, polls, error;
+	int retries = 0, polls, error;
 	uint32_t i, sent_so_far;
-	uint64_t want_acks = 0;
+	uint64_t want_acks=0;
+
 	rcvd_acks = 0;
 
-	/* We might get chunks too big to fit in packets. Yuck. */
-	/* TODO: We are going to go with a block size of 1024, 
-	 * which will allow all pages to fit into data blocks
-	 * - except for KDH header and trailer, which are 512 and
-	 * should be treated as EOF. */
-	retries = 0;
 retransmit:
-	for (i = sent_so_far = 0; sent_so_far < datalen || (i == 0 && datalen == 0);
+	/* We might get chunks too big to fit in packets. Yuck. */
+	for (i=sent_so_far=0; sent_so_far < datalen || (i==0 && datalen==0);
 		i++) {
-		nd_seqno++;
-
-
 		uint32_t pktlen = datalen-sent_so_far;
 		/* First bound: the packet structure */
 		pktlen = min(pktlen, NETDUMP_DATASIZE);
 		/* Second bound: the interface MTU (assume no IP options) */
 		pktlen = min(pktlen, nd_nic->if_mtu -
 				sizeof(struct udpiphdr) -
-				sizeof(struct netdump_msg_hdr) + 1);
+				sizeof(struct netdump_msg_hdr));
 
 		/* Check if we're retransmitting and this has been ACKed
 		 * already */
@@ -824,26 +817,26 @@ retransmit:
 		 * get and fill a header mbuf, then chain data as an extended
 		 * mbuf.
 		 */
-		m = m_gethdr(M_NOWAIT, MT_DATA);
+		MGETHDR(m, M_DONTWAIT, MT_DATA);
 		if (m == NULL) {
 			printf("netdump_send: Out of mbufs!\n");
-			break;
+			return ENOBUFS;
 		}
 		m->m_pkthdr.len = m->m_len = sizeof(struct netdump_msg_hdr);
 		/* leave room for udpip */
 		MH_ALIGN(m, sizeof(struct netdump_msg_hdr));
 		nd_msg_hdr = mtod(m, struct netdump_msg_hdr *);
-		nd_msg_hdr->mh_seqno = htonl(nd_seqno);
+		nd_msg_hdr->mh_seqno = htonl(nd_seqno+i);
 		nd_msg_hdr->mh_type = htonl(type);
 		nd_msg_hdr->mh_offset = htobe64(offset + sent_so_far);
 		nd_msg_hdr->mh_len = htonl(pktlen);
 		nd_msg_hdr->mh__pad = 0;
 
 		if (pktlen) {
-			if ((m2=m_get(M_DONTWAIT, MT_DATA)) == NULL) {
+			if ((m2 = m_get(M_DONTWAIT, MT_DATA)) == NULL) {
 				m_freem(m);
-				printf("netdump_send: Out of mbufs! 2\n");
-				break;
+				printf("netdump_send: Out of mbufs!\n");
+				return ENOBUFS;
 			}
 			MEXTADD(m2, data+sent_so_far, pktlen, netdump_mbuf_nop,
 				NULL, NULL, M_RDONLY, EXT_EXTREF);
@@ -860,7 +853,6 @@ retransmit:
 		want_acks |= 1 << i;
 
 		sent_so_far += pktlen;
-		retries = 0;
 	}
 
 	if (i >= sizeof(want_acks)*8) {
@@ -870,7 +862,10 @@ retransmit:
 		       sizeof(want_acks)*8, i);
 	}
 
-	polls=0;
+	/*
+	 * wait for acks. a *real* window would speed things up considerably.
+	 */
+	polls = 0;
 	while (rcvd_acks != want_acks) {		
 		if (polls++ > nd_polls) {
 			if (retries++ > nd_retries) {
@@ -885,8 +880,7 @@ retransmit:
 		netdump_network_poll();
 		DELAY(500); /* 0.5 ms */
 	}
-	if (sent_so_far < datalen)
-		goto retransmit;
+	nd_seqno += i;
 	return 0;
 }
 
@@ -1062,7 +1056,7 @@ nd_handle_ip(struct mbuf **mb)
 		nd_server_port = ntohs(udp->ui_u.uh_sport);
 	}
 
-	if (rcv_ackno > nd_seqno) {
+	if (rcv_ackno >= nd_seqno+64) {
 		printf("nd_handle_ip: ACK %d too far in future!\n", rcv_ackno);
 	} else if (rcv_ackno < nd_seqno) {
 		/* Do nothing: A duplicated past ACK */
@@ -1430,6 +1424,10 @@ netdump_trigger(void *arg, int howto)
 		printf("Failed to locate server MAC address\n");
 		goto trig_abort;
 	}
+	if (netdump_send(NETDUMP_HERALD, 0, NULL, 0) != 0) {
+		printf("Failed to contact netdump server\n");
+		goto trig_abort;
+	}
 	printf("dumping to %s (%6D)\n", inet_ntoa(nd_server),
 			nd_gw_mac.octet, ":");
 	printf("-----------------------------------\n");
@@ -1506,8 +1504,8 @@ netdump_config_defaults()
 	if (found != 0 && netdump_supported_nic(ifn))
 		nd_nic = ifn;
 	inet_aton("10.7.216.1", &nd_gw);
-	inet_aton("10.7.216.88", &nd_client);
-	inet_aton("10.7.217.100", &nd_server);
+	inet_aton("10.7.217.100", &nd_client);
+	inet_aton("10.7.216.224", &nd_server);
 
 	if (nd_server_tun[0] != '\0')
 		inet_aton(nd_server_tun, &nd_server);
