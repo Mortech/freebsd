@@ -161,11 +161,11 @@ int txlist2_head = -1;
  */
 struct mbuf *txlist[NETDUMP_RESERVED];
 struct mbuf *txlist2[NETDUMP_RESERVED];
-struct mbuf *rxlist[NETDUMP_RESERVED*4];
+struct mbuf *rxlist[NETDUMP_RESERVED];
 
 struct mbuf txdata[NETDUMP_RESERVED];
 struct mbuf txdata2[NETDUMP_RESERVED];
-struct mbuf rxdata[NETDUMP_RESERVED*4];
+struct mbuf rxdata[NETDUMP_RESERVED];
 
 /*
  * references for m2
@@ -216,7 +216,7 @@ netdump_prealloc_mbufs()
 		rxlist_head = i;
 	}
 
-	for(; i < NETDUMP_RESERVED*4; i++) {
+	for(; i < NETDUMP_RESERVED; i++) {
 		struct mbuf *m = &rxdata[i];
 		m_clget(m, M_NOWAIT);
 		m->m_flags = M_PKTHDR;
@@ -272,10 +272,7 @@ netdump_prealloc_mbufs()
 			}
 			break;
  		case EXT_PACKET:
- 			if (m < &rxdata[0] || m >= &rxdata[NETDUMP_RESERVED*4]) {
- 				return;
- 			}
-		 	if (rxlist_head + 1 < NETDUMP_RESERVED*4 &&
+		 	if (rxlist_head + 1 < NETDUMP_RESERVED &&
 		 	    rxlist[rxlist_head + 1] == NULL) {
  				rxlist_head = rxlist_head + 1;
 				rxlist[rxlist_head] = m;
@@ -793,17 +790,17 @@ netdump_send(uint32_t type, off_t offset, //TODO: Fix this function so that it n
 	struct mbuf *m, *m2;
 	int retries, polls, error;
 	uint32_t i, sent_so_far;
-	uint64_t want_acks=0;
-	rcvd_acks=0;
+	uint64_t want_acks = 0;
+	rcvd_acks = 0;
 
 	/* We might get chunks too big to fit in packets. Yuck. */
 	/* TODO: We are going to go with a block size of 1024, 
 	 * which will allow all pages to fit into data blocks
 	 * - except for KDH header and trailer, which are 512 and
 	 * should be treated as EOF. */
-	retries=0;
+	retries = 0;
 retransmit:
-	for (i=sent_so_far=0; sent_so_far < datalen || (i==0 && datalen==0);
+	for (i = sent_so_far = 0; sent_so_far < datalen || (i == 0 && datalen == 0);
 		i++) {
 		nd_seqno++;
 
@@ -863,6 +860,7 @@ retransmit:
 		want_acks |= 1 << i;
 
 		sent_so_far += pktlen;
+		retries = 0;
 	}
 
 	if (i >= sizeof(want_acks)*8) {
@@ -887,6 +885,8 @@ retransmit:
 		netdump_network_poll();
 		DELAY(500); /* 0.5 ms */
 	}
+	if (sent_so_far < datalen)
+		goto retransmit;
 	return 0;
 }
 
