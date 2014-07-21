@@ -133,7 +133,7 @@ static unsigned char buf[MAXDUMPPGS*PAGE_SIZE]; /* Must be at least as big as
 						 * us */
 static struct ether_addr nd_gw_mac;
 
-static int nd_enable = 1;  /* if we should perform a network dump */
+static int nd_enable = 0;  /* if we should perform a network dump */
 static struct in_addr nd_server = {INADDR_ANY}; /* server address */
 static struct in_addr nd_client = {INADDR_ANY}; /* client (our) address */
 static struct in_addr nd_gw = {INADDR_ANY}; /* gw, if set */
@@ -208,16 +208,6 @@ netdump_prealloc_mbufs()
 		txlist2_head = i;
 
 		m = &rxdata[i];
-		m_clget(m, M_NOWAIT);
-		m->m_flags = M_PKTHDR;
-		m->m_type = MT_DATA;
-		*(m->m_ext.ref_cnt) = 0;
-		rxlist[i] = m;
-		rxlist_head = i;
-	}
-
-	for(; i < NETDUMP_RESERVED; i++) {
-		struct mbuf *m = &rxdata[i];
 		m_clget(m, M_NOWAIT);
 		m->m_flags = M_PKTHDR;
 		m->m_type = MT_DATA;
@@ -1488,24 +1478,6 @@ static void
 netdump_config_defaults()
 {
 	struct ifnet *ifn;
-	int found;
-	rcvd_acks=0;
-
-	//XXXNJ: TODO: Remove my constants from this!
-	found = 0;
-	IFNET_RLOCK_NOSLEEP();
-	TAILQ_FOREACH(ifn, &V_ifnet, if_link) {
-		if (!strcmp(ifn->if_xname, "em0")) {
-			found = 1;
-			break;
-		}
-	}
-	IFNET_RUNLOCK_NOSLEEP();
-	if (found != 0 && netdump_supported_nic(ifn))
-		nd_nic = ifn;
-	inet_aton("10.7.216.1", &nd_gw);
-	inet_aton("10.7.217.100", &nd_client);
-	inet_aton("10.7.216.224", &nd_server);
 
 	if (nd_server_tun[0] != '\0')
 		inet_aton(nd_server_tun, &nd_server);
