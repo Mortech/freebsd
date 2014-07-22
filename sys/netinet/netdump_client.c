@@ -1403,22 +1403,6 @@ netdump_config_defaults()
 	struct ifnet *ifn;
 	int found;
 
-	//XXXNJ: TODO: REMOVE
-	found = 0;
-	IFNET_RLOCK_NOSLEEP();
-	TAILQ_FOREACH(ifn, &V_ifnet, if_link) {
-	if (!strcmp(ifn->if_xname, "em0")) {
-	found = 1;
-	break;
-	}
-	}
-	IFNET_RUNLOCK_NOSLEEP();
-	if (found != 0 && netdump_supported_nic(ifn))
-	nd_nic = ifn;
-	inet_aton("10.7.216.1", &nd_gw);
-	inet_aton("10.7.217.100", &nd_client);
-	inet_aton("10.7.216.224", &nd_server);
-
 	if (nd_server_tun[0] != '\0')
 		inet_aton(nd_server_tun, &nd_server);
 	if (nd_client_tun[0] != '\0')
