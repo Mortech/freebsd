@@ -42,6 +42,8 @@
 
 #define	NETDUMP_DATASIZE	8192	/* Packets payload. */
 #define NETDUMP_RESERVED	8
+#define NETDUMP_RECEIVE		1024
+#define NETDUMP_EXTSIZE		2048
 
 
 struct netdump_msg_hdr {

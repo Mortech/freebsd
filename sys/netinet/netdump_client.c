@@ -161,16 +161,19 @@ int txlist2_head = -1;
  */
 struct mbuf *txlist[NETDUMP_RESERVED];
 struct mbuf *txlist2[NETDUMP_RESERVED];
-struct mbuf *rxlist[NETDUMP_RESERVED];
+struct mbuf *rxlist[NETDUMP_RECEIVE];
 
-struct mbuf txdata[NETDUMP_RESERVED];
-struct mbuf txdata2[NETDUMP_RESERVED];
-struct mbuf rxdata[NETDUMP_RESERVED];
+struct mbuf txbuf[NETDUMP_RESERVED];
+struct mbuf txbuf2[NETDUMP_RESERVED];
+struct mbuf rxbuf[NETDUMP_RECEIVE];
 
-/*
- * references for m2
- */ 
-int reflist[NETDUMP_RESERVED];
+char txext[NETDUMP_RESERVED * NETDUMP_EXTSIZE];
+char rxext[NETDUMP_RECEIVE * NETDUMP_EXTSIZE];
+
+int txref[NETDUMP_RESERVED];
+int txref2[NETDUMP_RESERVED];
+int rxref[NETDUMP_RECEIVE];
+
 
 /*
  * [netdump_prealloc_mbufs]
@@ -189,26 +192,45 @@ netdump_prealloc_mbufs()
 {
 	int i;
 	for(i = 0; i < NETDUMP_RESERVED; i++) {
-		struct mbuf *m = &txdata[i];
-		m_clget(m, M_NOWAIT);
-		m->m_ext.ext_type = EXT_MOD_TYPE;
+		struct mbuf *m = &txbuf[i];
+		m->m_ext.ext_buf = &txext[i * NETDUMP_EXTSIZE];
+		m->m_ext.ref_cnt = &txref[i];
+		m->m_ext.ext_size = NETDUMP_EXTSIZE;
+		m->m_ext.ext_free = NULL;
+		m->m_ext.ext_arg1 = NULL;
+		m->m_ext.ext_arg2 = NULL;
+		m->m_ext.ext_type = 0;
+		m->m_ext.ext_flags = 0;
 		m->m_flags = M_PKTHDR;
 		m->m_type = MT_DATA;
 		*(m->m_ext.ref_cnt) = 0;
 		txlist[i] = m;
 		txlist_head = i;
 		
-		m = &txdata2[i];
-		m->m_ext.ref_cnt = &reflist[i];
-		m->m_ext.ext_type = EXT_EXTREF;
+		m = &txbuf2[i];
+		m->m_ext.ref_cnt = &txref2[i];
+		m->m_ext.ext_free = NULL;
+		m->m_ext.ext_arg1 = NULL;
+		m->m_ext.ext_arg2 = NULL;
+		m->m_ext.ext_type = 0;
+		m->m_ext.ext_flags = 0;
 		m->m_flags = 0;
 		m->m_type = MT_DATA;
 		*(m->m_ext.ref_cnt) = 0;
 		txlist2[i] = m;
 		txlist2_head = i;
+	}
 
-		m = &rxdata[i];
-		m_clget(m, M_NOWAIT);
+	for(i = 0; i < NETDUMP_RECEIVE; i++) {
+		struct mbuf *m = &rxbuf[i];
+		m->m_ext.ext_buf = &rxext[i * NETDUMP_EXTSIZE];
+		m->m_ext.ref_cnt = &rxref[i];
+		m->m_ext.ext_size = NETDUMP_EXTSIZE;
+		m->m_ext.ext_free = NULL;
+		m->m_ext.ext_arg1 = NULL;
+		m->m_ext.ext_arg2 = NULL;
+		m->m_ext.ext_type = 0;
+		m->m_ext.ext_flags = 0;
 		m->m_flags = M_PKTHDR;
 		m->m_type = MT_DATA;
 		*(m->m_ext.ref_cnt) = 0;
@@ -232,46 +254,29 @@ netdump_prealloc_mbufs()
  void
  netdump_free(struct mbuf *m)
  {
-	switch(m->m_ext.ext_type) {
- 		case EXT_EXTREF:
- 			/*
- 			 * If not part of the mbufs I allocated, ignore it
- 			 */
- 			if (m < &txdata2[0] || m >= &txdata2[NETDUMP_RESERVED]) {
- 				return;
- 			}
- 			/*
- 			 * If room on end of array, append to it
- 			 */
- 			if (txlist2_head + 1 < NETDUMP_RESERVED &&
- 			    txlist2[txlist2_head + 1] == NULL) {
- 				txlist2_head = txlist2_head + 1;
-				txlist2[txlist2_head] = m;
-				*(m->m_ext.ref_cnt) -= 1;
-			}
-			break;
- 		case EXT_MOD_TYPE:
- 			if (m < &txdata[0] || m >= &txdata[NETDUMP_RESERVED]) {
- 				return;
- 			}
- 			if (txlist_head + 1 < NETDUMP_RESERVED &&
- 			    txlist[txlist_head + 1] == NULL) {
- 				txlist_head = txlist_head + 1;
-				txlist[txlist_head] = m;
-				*(m->m_ext.ref_cnt) -= 1;
-			}
-			break;
- 		case EXT_PACKET:
-		 	if (rxlist_head + 1 < NETDUMP_RESERVED &&
-		 	    rxlist[rxlist_head + 1] == NULL) {
- 				rxlist_head = rxlist_head + 1;
-				rxlist[rxlist_head] = m;
-				*(m->m_ext.ref_cnt) -= 1;
-			}
-			break;
-		default:
-			printf("netdump_free: Freed invalid type %u\n",
-			    m->m_ext.ext_type);
+	if (m >= &txbuf[0] && m < &txbuf[NETDUMP_RESERVED]) {
+		if (txlist_head + 1 < NETDUMP_RESERVED &&
+		    txlist[txlist_head + 1] == NULL) {
+			txlist_head = txlist_head + 1;
+			txlist[txlist_head] = m;
+			*(m->m_ext.ref_cnt) -= 1;
+		}
+	} else if(m >= &txbuf2[0] && m < &txbuf2[NETDUMP_RESERVED]) {
+		if (txlist2_head + 1 < NETDUMP_RESERVED &&
+		    txlist2[txlist2_head + 1] == NULL) {
+			txlist2_head = txlist2_head + 1;
+			txlist2[txlist2_head] = m;
+			*(m->m_ext.ref_cnt) -= 1;
+		}
+	} else if(m >= &rxbuf[0] && m < &rxbuf[NETDUMP_RECEIVE]) {
+		if (rxlist_head + 1 < NETDUMP_RECEIVE &&
+	 	    rxlist[rxlist_head + 1] == NULL) {
+			rxlist_head = rxlist_head + 1;
+			rxlist[rxlist_head] = m;
+			*(m->m_ext.ref_cnt) -= 1;
+		}
+	} else {
+		return;
 	}
 
 	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)) { 
@@ -1478,6 +1483,7 @@ static void
 netdump_config_defaults()
 {
 	struct ifnet *ifn;
+	int found;
 
 	if (nd_server_tun[0] != '\0')
 		inet_aton(nd_server_tun, &nd_server);
