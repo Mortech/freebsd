@@ -41,8 +41,7 @@
 #define	NETDUMP_KDH		4	/* Contains kernel dump header. */
 
 #define	NETDUMP_DATASIZE	8192	/* Packets payload. */
-#define NETDUMP_RESERVED	8
-#define NETDUMP_RECEIVE		1024
+#define NETDUMP_RESERVED	1024
 #define NETDUMP_EXTSIZE		2048
 
 

@@ -151,28 +151,19 @@ static char nd_nic_tun[IFNAMSIZ];
 
 uint64_t rcvd_acks;
 
-/* Indexes into my 'lists' */
+/* Index into my 'list' */
 int txlist_head = -1;
-int rxlist_head = -1;
-int txlist2_head = -1;
 
 /* 
- * Separate lists for m, m2, and pkt_in
+ * List for mbufs and externals
  */
 struct mbuf *txlist[NETDUMP_RESERVED];
-struct mbuf *txlist2[NETDUMP_RESERVED];
-struct mbuf *rxlist[NETDUMP_RECEIVE];
 
 struct mbuf txbuf[NETDUMP_RESERVED];
-struct mbuf txbuf2[NETDUMP_RESERVED];
-struct mbuf rxbuf[NETDUMP_RECEIVE];
 
 char txext[NETDUMP_RESERVED * NETDUMP_EXTSIZE];
-char rxext[NETDUMP_RECEIVE * NETDUMP_EXTSIZE];
 
 int txref[NETDUMP_RESERVED];
-int txref2[NETDUMP_RESERVED];
-int rxref[NETDUMP_RECEIVE];
 
 
 /*
@@ -195,47 +186,7 @@ netdump_prealloc_mbufs()
 		struct mbuf *m = &txbuf[i];
 		m->m_ext.ext_buf = &txext[i * NETDUMP_EXTSIZE];
 		m->m_ext.ref_cnt = &txref[i];
-		m->m_ext.ext_size = NETDUMP_EXTSIZE;
-		m->m_ext.ext_free = NULL;
-		m->m_ext.ext_arg1 = NULL;
-		m->m_ext.ext_arg2 = NULL;
-		m->m_ext.ext_type = 0;
-		m->m_ext.ext_flags = 0;
-		m->m_flags = M_PKTHDR;
-		m->m_type = MT_DATA;
-		*(m->m_ext.ref_cnt) = 0;
-		txlist[i] = m;
-		txlist_head = i;
-		
-		m = &txbuf2[i];
-		m->m_ext.ref_cnt = &txref2[i];
-		m->m_ext.ext_free = NULL;
-		m->m_ext.ext_arg1 = NULL;
-		m->m_ext.ext_arg2 = NULL;
-		m->m_ext.ext_type = 0;
-		m->m_ext.ext_flags = 0;
-		m->m_flags = 0;
-		m->m_type = MT_DATA;
-		*(m->m_ext.ref_cnt) = 0;
-		txlist2[i] = m;
-		txlist2_head = i;
-	}
-
-	for(i = 0; i < NETDUMP_RECEIVE; i++) {
-		struct mbuf *m = &rxbuf[i];
-		m->m_ext.ext_buf = &rxext[i * NETDUMP_EXTSIZE];
-		m->m_ext.ref_cnt = &rxref[i];
-		m->m_ext.ext_size = NETDUMP_EXTSIZE;
-		m->m_ext.ext_free = NULL;
-		m->m_ext.ext_arg1 = NULL;
-		m->m_ext.ext_arg2 = NULL;
-		m->m_ext.ext_type = 0;
-		m->m_ext.ext_flags = 0;
-		m->m_flags = M_PKTHDR;
-		m->m_type = MT_DATA;
-		*(m->m_ext.ref_cnt) = 0;
-		rxlist[i] = m;
-		rxlist_head = i;
+		netdump_free(m);
 	}
 }
 
@@ -243,7 +194,7 @@ netdump_prealloc_mbufs()
  * [netdump_free]
  *
  * Take the mbuf that is about to be freed, 
- * set its fields to 0s and append to the proper list.
+ * set its fields to 0s and append to the free list.
  *
  * Parameters:
  *	m The mbuf to be 'freed'
@@ -254,38 +205,34 @@ netdump_prealloc_mbufs()
  void
  netdump_free(struct mbuf *m)
  {
-	if (m >= &txbuf[0] && m < &txbuf[NETDUMP_RESERVED]) {
-		if (txlist_head + 1 < NETDUMP_RESERVED &&
-		    txlist[txlist_head + 1] == NULL) {
-			txlist_head = txlist_head + 1;
-			txlist[txlist_head] = m;
-			*(m->m_ext.ref_cnt) -= 1;
-		}
-	} else if(m >= &txbuf2[0] && m < &txbuf2[NETDUMP_RESERVED]) {
-		if (txlist2_head + 1 < NETDUMP_RESERVED &&
-		    txlist2[txlist2_head + 1] == NULL) {
-			txlist2_head = txlist2_head + 1;
-			txlist2[txlist2_head] = m;
-			*(m->m_ext.ref_cnt) -= 1;
-		}
-	} else if(m >= &rxbuf[0] && m < &rxbuf[NETDUMP_RECEIVE]) {
-		if (rxlist_head + 1 < NETDUMP_RECEIVE &&
-	 	    rxlist[rxlist_head + 1] == NULL) {
-			rxlist_head = rxlist_head + 1;
-			rxlist[rxlist_head] = m;
-			*(m->m_ext.ref_cnt) -= 1;
-		}
-	} else {
+	if (m < &txbuf[0] || m >= &txbuf[NETDUMP_RESERVED]) {
 		return;
 	}
 
-	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE)) { 
-		m->m_ext.ext_free = NULL;
-		m->m_ext.ext_arg1 = NULL;
-		m->m_ext.ext_arg2 = NULL;
-		m->m_ext.ext_type = 0;
-		m->m_ext.ext_flags = 0;
+	if (txlist_head + 1 < NETDUMP_RESERVED &&
+	    txlist[txlist_head + 1] == NULL) {
+		txlist_head = txlist_head + 1;
+		txlist[txlist_head] = m;
+		*(m->m_ext.ref_cnt) -= 1;
 	}
+
+	m->m_ext.ext_free = NULL;
+	m->m_ext.ext_arg1 = NULL;
+	m->m_ext.ext_arg2 = NULL;
+	m->m_ext.ext_type = 0;
+	m->m_ext.ext_flags = 0;
+	m->m_flags = M_PKTHDR;
+	m->m_type = MT_DATA;
+	int i = ((char *)m - (char *)&txbuf[0]) / sizeof(struct mbuf);
+	m->m_ext.ext_buf = &txext[i * NETDUMP_EXTSIZE];
+	m->m_ext.ext_size = NETDUMP_EXTSIZE;
+	m->m_hdr.mh_flags = 3;
+	m->m_hdr.mh_next = NULL;
+	m->m_hdr.mh_nextpkt = NULL;
+	m->m_hdr.mh_len = 0;
+	m->m_hdr.mh_type = 1;
+	m->m_hdr.mh_data = m->m_ext.ext_buf;
+	m->m_ext.ext_type = EXT_EXTREF;
 
 	/*
 	 * If we have tags for some reason, leak them.
@@ -309,45 +256,15 @@ netdump_prealloc_mbufs()
  *	struct mbuf * A pointer to the requested mbuf
  */
  struct mbuf *
- netdump_alloc(short type)
+ netdump_alloc()
  {
  	struct mbuf *m = NULL;
- 	switch(type) {
- 		case EXT_EXTREF:
- 			if (txlist2_head > -1) {
-				m = txlist2[txlist2_head];
-				*(m->m_ext.ref_cnt) += 1;
-				txlist2[txlist2_head] = NULL;
-				txlist2_head--;
-				m->m_hdr.mh_flags = 0;
-			}
-			break;
- 		case EXT_MOD_TYPE:
- 			if (txlist_head > -1) {
-				m = txlist[txlist_head];
-				*(m->m_ext.ref_cnt) += 1;
-				txlist[txlist_head] = NULL;
-				txlist_head--;
-				m->m_hdr.mh_flags = 3;
-			}
-			break;
- 		case EXT_PACKET:
-		 	if (rxlist_head > -1) {
-				m = rxlist[rxlist_head];
-				*(m->m_ext.ref_cnt) += 1;
-				rxlist[rxlist_head] = NULL;
-				rxlist_head--;
-				m->m_hdr.mh_flags = 3;
-			}
-	}
-	if (m != NULL) {
-		/* reset header info */
-		m->m_hdr.mh_next = NULL;
-		m->m_hdr.mh_nextpkt = NULL;
-		m->m_hdr.mh_len = 0;
-		m->m_hdr.mh_type = 1;
-		m->m_hdr.mh_data = m->m_ext.ext_buf;
-		m->m_ext.ext_type = type;
+	if (txlist_head > -1) {
+		m = txlist[txlist_head];
+		*(m->m_ext.ref_cnt) += 1;
+		txlist[txlist_head] = NULL;
+		txlist_head--;
+		m->m_hdr.mh_flags = 3;
 	}
 	return m;
  }
@@ -833,6 +750,7 @@ retransmit:
 				printf("netdump_send: Out of mbufs!\n");
 				return ENOBUFS;
 			}
+			m2->m_hdr.mh_flags = 0;
 			MEXTADD(m2, data+sent_so_far, pktlen, netdump_mbuf_nop,
 				NULL, NULL, M_RDONLY, EXT_EXTREF);
 			m2->m_len = pktlen;
@@ -1484,6 +1402,22 @@ netdump_config_defaults()
 {
 	struct ifnet *ifn;
 	int found;
+
+	//XXXNJ: TODO: REMOVE
+	found = 0;
+	IFNET_RLOCK_NOSLEEP();
+	TAILQ_FOREACH(ifn, &V_ifnet, if_link) {
+	if (!strcmp(ifn->if_xname, "em0")) {
+	found = 1;
+	break;
+	}
+	}
+	IFNET_RUNLOCK_NOSLEEP();
+	if (found != 0 && netdump_supported_nic(ifn))
+	nd_nic = ifn;
+	inet_aton("10.7.216.1", &nd_gw);
+	inet_aton("10.7.217.100", &nd_client);
+	inet_aton("10.7.216.224", &nd_server);
 
 	if (nd_server_tun[0] != '\0')
 		inet_aton(nd_server_tun, &nd_server);

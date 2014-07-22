@@ -518,7 +518,7 @@ extern uma_zone_t	zone_ext_refcnt;
 void		 mb_free_ext(struct mbuf *);
 int		 m_pkthdr_init(struct mbuf *, int);
 #ifdef NETDUMP_CLIENT
-struct mbuf * netdump_alloc(short);
+struct mbuf * netdump_alloc(void);
 void netdump_free(struct mbuf *);
 void netdump_prealloc_mbufs(void);
 #endif
@@ -634,7 +634,7 @@ m_get(int how, short type)
 {
 #ifdef NETDUMP_CLIENT
 	if (panicstr != NULL ) {
-		return netdump_alloc(EXT_EXTREF);
+		return netdump_alloc();
 	}
 #endif
 	struct mb_args args;
@@ -655,7 +655,7 @@ m_getclr(int how, short type)
 
 #ifdef NETDUMP_CLIENT
 	if (panicstr != NULL ) {
-		m = netdump_alloc(EXT_PACKET);
+		m = netdump_alloc();
 		if (m != NULL)
 			bzero(m->m_data, MLEN);
 		return (m);
@@ -674,7 +674,7 @@ m_gethdr(int how, short type)
 {
 #ifdef NETDUMP_CLIENT
 	if (panicstr != NULL ) {
-		return netdump_alloc(EXT_MOD_TYPE);
+		return netdump_alloc();
 	}
 #endif
 	struct mb_args args;
@@ -689,7 +689,7 @@ m_getcl(int how, short type, int flags)
 {
 #ifdef NETDUMP_CLIENT
 	if (panicstr != NULL ) {
-		return netdump_alloc(EXT_PACKET);
+		return netdump_alloc();
 	}
 #endif
 	struct mb_args args;
