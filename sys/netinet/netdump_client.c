@@ -118,9 +118,6 @@ static int	 netdump_send_arp(void);
 static void	 netdump_trigger(void *arg, int howto);
 static int	 netdump_udp_output(struct mbuf *m);
 
-#ifdef NETDUMP_CLIENT_DEBUG
-static int	 sysctl_force_crash(SYSCTL_HANDLER_ARGS);
-#endif
 static int	 sysctl_ip(SYSCTL_HANDLER_ARGS);
 static int	 sysctl_nic(SYSCTL_HANDLER_ARGS);
 
@@ -393,40 +390,6 @@ sysctl_nic(SYSCTL_HANDLER_ARGS)
 	return error;
 }
 
-#ifdef NETDUMP_CLIENT_DEBUG
-static int
-sysctl_force_crash(SYSCTL_HANDLER_ARGS) 
-{
-	int error, force_crash;
-
-	force_crash = 0;
-	error = sysctl_handle_int(oidp, &force_crash, force_crash, req);
-	if (error || req->newptr == NULL)
-		return error;
-
-	switch (force_crash) {
-		case 1:
-			printf("\nLivelocking system...\n");
-			for (;;);
-			break;
-		case 2:
-			printf("\nPanic'ing system...\n");
-			panic("netdump forced crash");
-			break;
-		case 3:
-			critical_enter();
-			panic("Forcing spourious critical section");
-			break;
-		case 4:
-			critical_enter();
-			printf("\nLivelocking in a critical section\n");
-			for (;;);
-		default:
-			return EINVAL;
-	}
-	return 0;
-}
-#endif
 
 SYSCTL_NODE(_net, OID_AUTO, dump, CTLFLAG_RW, 0, "netdump");
 SYSCTL_PROC(_net_dump, OID_AUTO, server, CTLTYPE_STRING|CTLFLAG_RW, &nd_server,
@@ -443,11 +406,6 @@ SYSCTL_INT(_net_dump, OID_AUTO, retries, CTLTYPE_INT|CTLFLAG_RW, &nd_retries, 0,
 	"times to retransmit lost packets");
 SYSCTL_INT(_net_dump, OID_AUTO, enable, CTLTYPE_INT|CTLFLAG_RW, &nd_enable,
 	0, "enable network dump");
-#ifdef NETDUMP_CLIENT_DEBUG
-SYSCTL_NODE(_debug, OID_AUTO, netdump, CTLFLAG_RW, NULL, "Netdump debugging");
-SYSCTL_PROC(_debug_netdump, OID_AUTO, crash, CTLTYPE_INT|CTLFLAG_RW, 0,
-    sizeof(int), sysctl_force_crash, "I", "force crashing");
-#endif
 TUNABLE_STR("net.dump.server", nd_server_tun, sizeof(nd_server_tun));
 TUNABLE_STR("net.dump.client", nd_client_tun, sizeof(nd_client_tun));
 TUNABLE_STR("net.dump.gateway", nd_gw_tun, sizeof(nd_gw_tun));
@@ -909,13 +867,13 @@ nd_handle_ip(struct mbuf **mb)
 
 	/* Check that the source is the server's IP */
 	if (ip->ip_src.s_addr != nd_server.s_addr) {
-		//NETDDEBUG("nd_handle_ip: Drop packet not from server\n");
+		NETDDEBUG("nd_handle_ip: Drop packet not from server\n");
 		return;
 	}
 
 	/* Check if the destination IP is ours */
 	if (ip->ip_dst.s_addr != nd_client.s_addr) {
-		//NETDDEBUGV("nd_handle_ip: Drop packet not to our IP\n");
+		NETDDEBUGV("nd_handle_ip: Drop packet not to our IP\n");
 		return;
 	}
 
@@ -1094,7 +1052,7 @@ nd_handle_arp(struct mbuf **mb)
 	}
 
 	if (itaddr.s_addr != nd_client.s_addr) {
-		//NETDDEBUG("nd_handle_arp: ignoring ARP not to our IP\n");
+		NETDDEBUG("nd_handle_arp: ignoring ARP not to our IP\n");
 		return;
 	}
 
