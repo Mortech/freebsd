@@ -135,9 +135,10 @@ static struct in_addr nd_server = {INADDR_ANY}; /* server address */
 static struct in_addr nd_client = {INADDR_ANY}; /* client (our) address */
 static struct in_addr nd_gw = {INADDR_ANY}; /* gw, if set */
 struct ifnet *nd_nic = NULL;
-static int nd_polls=10000; /* Times to poll the NIC (0.5ms each poll) before
+static int nd_polls = 10000; /* Times to poll the NIC (0.5ms each poll) before
 			    * assuming packetloss occurred: 5s by default */
-static int nd_retries=10; /* Times to retransmit lost packets */
+static int nd_retries = 10; /* Times to retransmit lost packets */
+static int nd_reserved = NETDUMP_RESERVED; /* number of mbufs we have */
 
 /* Tunables storages. */
 static char nd_server_tun[INET_ADDRSTRLEN];
@@ -154,13 +155,13 @@ int txlist_head = -1;
 /* 
  * List for mbufs and externals
  */
-struct mbuf *txlist[NETDUMP_RESERVED];
+struct mbuf **txlist = NULL;
 
-struct mbuf txbuf[NETDUMP_RESERVED];
+struct mbuf *txbuf = NULL;
 
-char txext[NETDUMP_RESERVED * NETDUMP_EXTSIZE];
+char *txext = NULL;
 
-int txref[NETDUMP_RESERVED];
+u_int *txref = NULL;
 
 
 /*
@@ -178,8 +179,31 @@ int txref[NETDUMP_RESERVED];
 void
 netdump_prealloc_mbufs()
 {
+	/* tear down any existing memory segments */
+	if (txlist != NULL) {
+		free(txlist, M_CACHE);
+		free(txbuf, M_CACHE);
+		free(txext, M_CACHE);
+		free(txref, M_CACHE);
+		txlist_head = -1;
+		txlist = NULL;
+		txbuf = NULL;
+		txext = NULL;
+		txref = NULL;
+	}
+	if (nd_reserved < 1) {
+		nd_reserved = 0;
+		return;
+	}
+	/* malloc memory segments for our mbufs */
+	txlist = malloc(sizeof(struct mbuf *) * nd_reserved, M_CACHE, M_ZERO | M_NODUMP);
+	txbuf = malloc(sizeof(struct mbuf) * nd_reserved, M_CACHE, M_ZERO | M_NODUMP);
+	txext = malloc(NETDUMP_EXTSIZE * nd_reserved, M_CACHE, M_ZERO | M_NODUMP);
+	txref = malloc(sizeof(u_int) * nd_reserved, M_CACHE, M_ZERO | M_NODUMP);
+
+	/* put these onto our new list */
 	int i;
-	for(i = 0; i < NETDUMP_RESERVED; i++) {
+	for(i = 0; i < nd_reserved; i++) {
 		struct mbuf *m = &txbuf[i];
 		m->m_ext.ext_buf = &txext[i * NETDUMP_EXTSIZE];
 		m->m_ext.ref_cnt = &txref[i];
@@ -202,11 +226,11 @@ netdump_prealloc_mbufs()
  void
  netdump_free(struct mbuf *m)
  {
-	if (m < &txbuf[0] || m >= &txbuf[NETDUMP_RESERVED]) {
+	if (m < &txbuf[0] || m >= &txbuf[nd_reserved]) {
 		return;
 	}
 
-	if (txlist_head + 1 < NETDUMP_RESERVED &&
+	if (txlist_head + 1 < nd_reserved &&
 	    txlist[txlist_head + 1] == NULL) {
 		txlist_head = txlist_head + 1;
 		txlist[txlist_head] = m;
@@ -390,6 +414,50 @@ sysctl_nic(SYSCTL_HANDLER_ARGS)
 	return error;
 }
 
+/*
+ * [sysctl_reserved]
+ *
+ * sysctl handler to handle a new number of mbufs to prealloc
+ *
+ * Parameters:
+ *	SYSCTL_HANDLER_ARGS
+ *	 - arg1 is an int *
+ *	 - arg2 is a constant
+ *
+ * Returns:
+ *	int	see errno.h, 0 for success
+ */
+static int
+sysctl_reserved(SYSCTL_HANDLER_ARGS)
+{
+
+	int tmpout, error = 0;
+
+	/*
+	 * Attempt to get a coherent snapshot by making a copy of the data.
+	 */
+	if (arg1)
+		tmpout = *(int *)arg1;
+	else
+		tmpout = arg2;
+	error = SYSCTL_OUT(req, &tmpout, sizeof(int));
+
+	if (error || !req->newptr)
+		return (error);
+
+	if (!arg1)
+		error = EPERM;
+	else {
+		error = SYSCTL_IN(req, arg1, sizeof(int));
+	}
+	if (error)
+		return (error);
+
+	netdump_prealloc_mbufs();
+
+	return 0;
+}
+
 
 SYSCTL_NODE(_net, OID_AUTO, dump, CTLFLAG_RW, 0, "netdump");
 SYSCTL_PROC(_net_dump, OID_AUTO, server, CTLTYPE_STRING|CTLFLAG_RW, &nd_server,
@@ -400,6 +468,8 @@ SYSCTL_PROC(_net_dump, OID_AUTO, gateway, CTLTYPE_STRING|CTLFLAG_RW, &nd_gw,
 	0, sysctl_ip, "A", "dump default gateway");
 SYSCTL_PROC(_net_dump, OID_AUTO, nic, CTLTYPE_STRING|CTLFLAG_RW, &nd_nic,
 	IFNAMSIZ, sysctl_nic, "A", "NIC to dump on");
+SYSCTL_PROC(_net_dump, OID_AUTO, reserved, CTLTYPE_INT|CTLFLAG_RW, &nd_reserved,
+	0, sysctl_reserved, "I", "number of mbufs to prealloc");
 SYSCTL_INT(_net_dump, OID_AUTO, polls, CTLTYPE_INT|CTLFLAG_RW, &nd_polls, 0,
 	"times to poll NIC per retry");
 SYSCTL_INT(_net_dump, OID_AUTO, retries, CTLTYPE_INT|CTLFLAG_RW, &nd_retries, 0,
@@ -411,6 +481,7 @@ TUNABLE_STR("net.dump.client", nd_client_tun, sizeof(nd_client_tun));
 TUNABLE_STR("net.dump.gateway", nd_gw_tun, sizeof(nd_gw_tun));
 TUNABLE_STR("net.dump.nic", nd_nic_tun, sizeof(nd_nic_tun));
 TUNABLE_INT("net.dump.enable", &nd_enable);
+TUNABLE_INT("net.dump.reserved", &nd_reserved);
 
 /*-
  * Network specific primitives.
