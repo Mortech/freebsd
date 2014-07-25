@@ -148,6 +148,9 @@ static char nd_nic_tun[IFNAMSIZ];
 
 
 uint64_t rcvd_acks;
+size_t buflen;
+off_t bufoffset;
+int first = 0;
 
 /* Index into my 'list' */
 int txlist_head = -1;
@@ -1260,7 +1263,7 @@ static int
 netdump_dumper(void *priv, void *virtual, vm_offset_t physical, off_t offset,
 		size_t length)
 {
-	int err;
+	int err = 0;
 	int msgtype = NETDUMP_VMCORE;
 
 	(void)priv;
@@ -1271,17 +1274,26 @@ netdump_dumper(void *priv, void *virtual, vm_offset_t physical, off_t offset,
 	if (length > sizeof(buf))
 		return ENOSPC;
 	/*
-	 * The first write (at offset 0) is the kernel dump header.  Flag it
-	 * for the server to treat specially.  XXX: This doesn't strip out the
-	 * footer KDH, although it shouldn't hurt anything.
+	 * The first write is the kernel dump header.  Flag it
+	 * for the server to treat specially. The last write is the footer
+	 * and is therefore ignored.
 	 */
-	if (offset == 0 && length > 0)
+	if (first == 0) {
+		first = 1;
 		msgtype = NETDUMP_KDH;
-	else if (offset > 0)
+		memcpy(buf, virtual, length);
+		err = netdump_send(msgtype, 0, buf, length);
+	} else {
 		offset -= sizeof(struct kerneldumpheader);
-
-	memcpy(buf, virtual, length);
-	err=netdump_send(msgtype, offset, buf, length);
+		if (first == 1) {
+			first = 2;
+		} else {
+			err = netdump_send(msgtype, bufoffset, buf, buflen);
+		}
+		memcpy(buf, virtual, length);
+		buflen = length;
+		bufoffset = offset;
+	}
 	if (err) {
 		dump_failed = 1;
 		return err;
