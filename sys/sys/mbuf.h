@@ -520,7 +520,6 @@ int		 m_pkthdr_init(struct mbuf *, int);
 #ifdef NETDUMP_CLIENT
 struct mbuf * netdump_alloc(void);
 void netdump_free(struct mbuf *);
-void netdump_prealloc_mbufs(void);
 #endif
 
 static __inline int

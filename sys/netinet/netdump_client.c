@@ -120,6 +120,7 @@ static int	 netdump_udp_output(struct mbuf *m);
 
 static int	 sysctl_ip(SYSCTL_HANDLER_ARGS);
 static int	 sysctl_nic(SYSCTL_HANDLER_ARGS);
+int	netdump_prealloc_mbufs(void);
 
 static eventhandler_tag nd_tag = NULL;       /* record of our shutdown event */
 static uint32_t nd_seqno = 1;		     /* current sequence number */
@@ -179,7 +180,7 @@ u_int *txref = NULL;
  * Returns:
  *	void
  */
-void
+int
 netdump_prealloc_mbufs()
 {
 	/* tear down any existing memory segments */
@@ -194,15 +195,41 @@ netdump_prealloc_mbufs()
 		txext = NULL;
 		txref = NULL;
 	}
-	if (nd_reserved < 1) {
+	if (nd_reserved < 0) {
 		nd_reserved = 0;
-		return;
+		return EINVAL;
+	}
+	if (nd_reserved == 0) {
+		nd_reserved = 0;
+		return 0;
 	}
 	/* malloc memory segments for our mbufs */
-	txlist = malloc(sizeof(struct mbuf *) * nd_reserved, M_CACHE, M_ZERO | M_NODUMP);
-	txbuf = malloc(sizeof(struct mbuf) * nd_reserved, M_CACHE, M_ZERO | M_NODUMP);
-	txext = malloc(NETDUMP_EXTSIZE * nd_reserved, M_CACHE, M_ZERO | M_NODUMP);
-	txref = malloc(sizeof(u_int) * nd_reserved, M_CACHE, M_ZERO | M_NODUMP);
+	txlist = malloc(sizeof(struct mbuf *) * nd_reserved, M_CACHE, M_ZERO | M_NODUMP | M_NOWAIT);
+	if (txlist == NULL) {
+		nd_reserved = 0;
+		return ENOSPC;
+	}
+	txbuf = malloc(sizeof(struct mbuf) * nd_reserved, M_CACHE, M_ZERO | M_NODUMP | M_NOWAIT);
+	if (txbuf == NULL) {
+		free(txlist, M_CACHE);
+		nd_reserved = 0;
+		return ENOSPC;
+	}
+	txext = malloc(NETDUMP_EXTSIZE * nd_reserved, M_CACHE, M_ZERO | M_NODUMP | M_NOWAIT);
+	if (txext == NULL) {
+		free(txlist, M_CACHE);
+		free(txbuf, M_CACHE);
+		nd_reserved = 0;
+		return ENOSPC;
+	}
+	txref = malloc(sizeof(u_int) * nd_reserved, M_CACHE, M_ZERO | M_NODUMP | M_NOWAIT);
+	if (txref == NULL) {
+		free(txlist, M_CACHE);
+		free(txbuf, M_CACHE);
+		free(txext, M_CACHE);
+		nd_reserved = 0;
+		return ENOSPC;
+	}
 
 	/* put these onto our new list */
 	int i;
@@ -212,6 +239,7 @@ netdump_prealloc_mbufs()
 		m->m_ext.ref_cnt = &txref[i];
 		netdump_free(m);
 	}
+	return 0;
 }
 
 /*
@@ -421,11 +449,11 @@ sysctl_nic(SYSCTL_HANDLER_ARGS)
  * [sysctl_reserved]
  *
  * sysctl handler to handle a new number of mbufs to prealloc
+ * based on the sysctl_handle_int function in kern_sysctl.c 
  *
- * Parameters:
- *	SYSCTL_HANDLER_ARGS
- *	 - arg1 is an int *
- *	 - arg2 is a constant
+ * Two cases:
+ *     a variable:  point arg1 at it.
+ *     a constant:  pass it in arg2.
  *
  * Returns:
  *	int	see errno.h, 0 for success
@@ -456,9 +484,7 @@ sysctl_reserved(SYSCTL_HANDLER_ARGS)
 	if (error)
 		return (error);
 
-	netdump_prealloc_mbufs();
-
-	return 0;
+	return netdump_prealloc_mbufs();
 }
 
 

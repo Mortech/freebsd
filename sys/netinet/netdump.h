@@ -41,7 +41,10 @@
 #define	NETDUMP_KDH		4	/* Contains kernel dump header. */
 
 #define	NETDUMP_DATASIZE	8192	/* Packets payload. */
-#define NETDUMP_RESERVED	1024
+#define NETDUMP_RESERVED	0	/* Number of mbufs set aside for netdump
+					 * by default, increase through sysctl
+					 * Should be around 8 mbufs above the
+					 * receive ring size to prevent errors*/
 #define NETDUMP_EXTSIZE		2048
 
 
