@@ -121,6 +121,7 @@ static int	 netdump_udp_output(struct mbuf *m);
 static int	 sysctl_ip(SYSCTL_HANDLER_ARGS);
 static int	 sysctl_nic(SYSCTL_HANDLER_ARGS);
 int	netdump_prealloc_mbufs(void);
+void	netdump_free_mbuf_structs(void);
 
 static eventhandler_tag nd_tag = NULL;       /* record of our shutdown event */
 static uint32_t nd_seqno = 1;		     /* current sequence number */
@@ -171,30 +172,20 @@ u_int *txref = NULL;
 /*
  * [netdump_prealloc_mbufs]
  *
- * Called upon module load. Initializes a set number of mbufs and sets
- * them aside for use later during netdumping.
+ * Called upon module load and when setting the reserved sysctl.
+ * Frees any previously allocated mbufs, and initializes a new set of mbufs for
+ * use later during netdumping.
  *
  * Parameters:
  *	void
  *
  * Returns:
- *	void
+ *	int an error code or 0 if successful
  */
 int
 netdump_prealloc_mbufs()
 {
-	/* tear down any existing memory segments */
-	if (txlist != NULL) {
-		free(txlist, M_CACHE);
-		free(txbuf, M_CACHE);
-		free(txext, M_CACHE);
-		free(txref, M_CACHE);
-		txlist_head = -1;
-		txlist = NULL;
-		txbuf = NULL;
-		txext = NULL;
-		txref = NULL;
-	}
+	netdump_free_mbuf_structs();
 	if (nd_reserved < 0) {
 		nd_reserved = 0;
 		return EINVAL;
@@ -207,27 +198,25 @@ netdump_prealloc_mbufs()
 	txlist = malloc(sizeof(struct mbuf *) * nd_reserved, M_CACHE, M_ZERO | M_NODUMP | M_NOWAIT);
 	if (txlist == NULL) {
 		nd_reserved = 0;
+		netdump_free_mbuf_structs();
 		return ENOSPC;
 	}
 	txbuf = malloc(sizeof(struct mbuf) * nd_reserved, M_CACHE, M_ZERO | M_NODUMP | M_NOWAIT);
 	if (txbuf == NULL) {
-		free(txlist, M_CACHE);
 		nd_reserved = 0;
+		netdump_free_mbuf_structs();
 		return ENOSPC;
 	}
 	txext = malloc(NETDUMP_EXTSIZE * nd_reserved, M_CACHE, M_ZERO | M_NODUMP | M_NOWAIT);
 	if (txext == NULL) {
-		free(txlist, M_CACHE);
-		free(txbuf, M_CACHE);
 		nd_reserved = 0;
+		netdump_free_mbuf_structs();
 		return ENOSPC;
 	}
 	txref = malloc(sizeof(u_int) * nd_reserved, M_CACHE, M_ZERO | M_NODUMP | M_NOWAIT);
 	if (txref == NULL) {
-		free(txlist, M_CACHE);
-		free(txbuf, M_CACHE);
-		free(txext, M_CACHE);
 		nd_reserved = 0;
+		netdump_free_mbuf_structs();
 		return ENOSPC;
 	}
 
@@ -240,6 +229,38 @@ netdump_prealloc_mbufs()
 		netdump_free(m);
 	}
 	return 0;
+}
+
+/*
+ * [netdump_free_mbuf_structs]
+ *
+ * Tear down any existing memory segments
+ *
+ * Parameters:
+ *	void
+ *
+ * Returns:
+ *	void
+ */
+void
+netdump_free_mbuf_structs(){
+	txlist_head = -1;
+	if (txlist != NULL) {
+		free(txlist, M_CACHE);
+		txlist = NULL;
+	}
+	if (txbuf != NULL) {
+		free(txbuf, M_CACHE);
+		txbuf = NULL;
+	}
+	if (txref != NULL) {
+		free(txref, M_CACHE);
+		txref = NULL;
+	}
+	if (txext != NULL) {
+		free(txext, M_CACHE);
+		txext = NULL;
+	}
 }
 
 /*
