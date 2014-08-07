@@ -32,7 +32,7 @@
 
 #include <sys/types.h>
 
-#define	NETDUMP_PORT		20023	/* 69 is TFTP default port num */
+#define	NETDUMP_PORT		20023	/* Netdump server default port num */
 #define	NETDUMP_ACKPORT		20024	/* Client udp port number for acks. */
 
 #define	NETDUMP_HERALD		1	/* Broadcast before starting a dump. */

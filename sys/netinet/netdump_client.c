@@ -195,26 +195,26 @@ netdump_prealloc_mbufs()
 		return 0;
 	}
 	/* malloc memory segments for our mbufs */
-	txlist = malloc(sizeof(struct mbuf *) * nd_reserved, M_CACHE, M_ZERO | M_NODUMP | M_NOWAIT);
-	if (txlist == NULL) {
+	if ((txlist = malloc(sizeof(struct mbuf *) * nd_reserved, M_CACHE,
+	    M_ZERO | M_NODUMP | M_NOWAIT)) == NULL) {
 		nd_reserved = 0;
 		netdump_free_mbuf_structs();
 		return ENOSPC;
 	}
-	txbuf = malloc(sizeof(struct mbuf) * nd_reserved, M_CACHE, M_ZERO | M_NODUMP | M_NOWAIT);
-	if (txbuf == NULL) {
+	if ((txbuf = malloc(sizeof(struct mbuf) * nd_reserved, M_CACHE,
+	    M_ZERO | M_NODUMP | M_NOWAIT)) == NULL) {
 		nd_reserved = 0;
 		netdump_free_mbuf_structs();
 		return ENOSPC;
 	}
-	txext = malloc(NETDUMP_EXTSIZE * nd_reserved, M_CACHE, M_ZERO | M_NODUMP | M_NOWAIT);
-	if (txext == NULL) {
+	if ((txext = malloc(NETDUMP_EXTSIZE * nd_reserved, M_CACHE,
+	    M_ZERO | M_NODUMP | M_NOWAIT)) == NULL) {
 		nd_reserved = 0;
 		netdump_free_mbuf_structs();
 		return ENOSPC;
 	}
-	txref = malloc(sizeof(u_int) * nd_reserved, M_CACHE, M_ZERO | M_NODUMP | M_NOWAIT);
-	if (txref == NULL) {
+	if ((txref = malloc(sizeof(u_int) * nd_reserved, M_CACHE,
+	    M_ZERO | M_NODUMP | M_NOWAIT)) == NULL) {
 		nd_reserved = 0;
 		netdump_free_mbuf_structs();
 		return ENOSPC;
@@ -267,7 +267,7 @@ netdump_free_mbuf_structs(){
  * [netdump_free]
  *
  * Take the mbuf that is about to be freed, 
- * set its fields to 0s and append to the free list.
+ * reset its fields and append it to the free list.
  *
  * Parameters:
  *	m The mbuf to be 'freed'
@@ -319,11 +319,11 @@ netdump_free_mbuf_structs(){
 /*
  * [netdump_alloc]
  *
- * Pull an mbuf off of the appropriate list if one is ready to use,
+ * Pull an mbuf off of the list if one is ready to use,
  * or NULL if none are available
  *
  * Parameters:
- *	type The type of mbuf to be 'alloced'
+ *	type The type of mbuf to be 'allocated'
  *
  * Returns:
  *	struct mbuf * A pointer to the requested mbuf
@@ -1293,7 +1293,8 @@ netdump_network_poll()
  *
  * Callback from dumpsys() to dump a chunk of memory
  * Copies it out to our static buffer then sends it across the network
- * Detects the initial KDH and makes sure it's given a special packet type
+ * First chunk is the header and last is the footer, so treat the KDH 
+ * specially and delay sending by one chunk to ensure we do not send the footer
  *
  * Parameters:
  *	priv	 Unused. Optional private pointer.
@@ -1320,11 +1321,6 @@ netdump_dumper(void *priv, void *virtual, vm_offset_t physical, off_t offset,
 
 	if (length > sizeof(buf))
 		return ENOSPC;
-	/*
-	 * The first write is the kernel dump header.  Flag it
-	 * for the server to treat specially. The last write is the footer
-	 * and is therefore ignored.
-	 */
 	if (first == 0) {
 		first = 1;
 		msgtype = NETDUMP_KDH;
