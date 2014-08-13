@@ -45,8 +45,6 @@
 #endif
 #endif
 
-
-
 /*
  * Mbufs are of a single size, MSIZE (sys/param.h), which includes overhead.
  * An mbuf may add a single "mbuf cluster" of size MCLBYTES (also in
@@ -1165,7 +1163,6 @@ m_tag_find(struct mbuf *m, int type, struct m_tag *start)
 static __inline struct mbuf *
 m_free(struct mbuf *m)
 {
-
 	struct mbuf *n = m->m_next;
 
 #ifdef NETDUMP_CLIENT
@@ -1174,7 +1171,6 @@ m_free(struct mbuf *m)
 		return (n);
 	}
 #endif
-
 	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE))
 		m_tag_delete_chain(m, NULL);
 	if (m->m_flags & M_EXT)

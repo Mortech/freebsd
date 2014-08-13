@@ -4501,7 +4501,6 @@ em_initialize_receive_unit(struct adapter *adapter)
 static bool
 em_rxeof(struct rx_ring *rxr, int count, int *done)
 {
-
 	struct adapter		*adapter = rxr->adapter;
 	struct ifnet		*ifp = adapter->ifp;
 	struct mbuf		*mp, *sendmp;

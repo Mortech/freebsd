@@ -372,7 +372,6 @@ mbuf_init(void *dummy)
 
 	/* uma_prealloc() goes here... */
 
-
 	/*
 	 * Hook event handler for low-memory situation, used to
 	 * drain protocols and push data back to the caches (UMA
