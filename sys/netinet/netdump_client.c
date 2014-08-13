@@ -240,7 +240,8 @@ netdump_prealloc_mbufs()
  *	void
  */
 void
-netdump_free_mbuf_structs(){
+netdump_free_mbuf_structs()
+{
 	txlist_head = -1;
 	if (txlist != NULL) {
 		free(txlist, M_CACHE);
